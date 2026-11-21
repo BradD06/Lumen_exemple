@@ -373,10 +373,10 @@ public enum NeuralVoiceCache {
     public static func audio(for speech: NeuralSpeechRequest, key: String) async throws -> NeuralAudio {
         let file = directory.appending(path: speech.cacheKey + ".mp3")
         let wordsFile = directory.appending(path: speech.cacheKey + ".words.json")
-        if let audio = cached(file, words: wordsFile) { return audio }
+        if let audio = cached(file, words: wordsFile, text: speech.text) { return audio }
         return try await NeuralVoiceFetches.shared.audio(for: speech.cacheKey) {
             // Пока ждали очереди, фраза могла уже лечь в кеш.
-            if let audio = cached(file, words: wordsFile) { return audio }
+            if let audio = cached(file, words: wordsFile, text: speech.text) { return audio }
             let audio: NeuralAudio
             do {
                 audio = try await fetch(speech, key: key)
@@ -386,10 +386,10 @@ public enum NeuralVoiceCache {
             }
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try? audio.data.write(to: file, options: .atomic)
-            if let words = audio.words, let json = try? JSONEncoder().encode(words) {
-                try? json.write(to: wordsFile, options: .atomic)
-            }
-            return audio
+            var result = audio
+            if result.words == nil { result.words = SpeechAlignment.words(in: speech.text, audio: file) }
+            save(result.words, to: wordsFile)
+            return result
         }
     }
 
@@ -407,12 +407,23 @@ public enum NeuralVoiceCache {
         return NeuralAudio(data: try await client.speech(speech), words: nil)
     }
 
-    private static func cached(_ file: URL, words wordsFile: URL) -> NeuralAudio? {
+    /// Фраза из кеша. Если времени слов при ней нет (скачана до подсветки слов), оно один раз
+    /// считается по самому звуку и ложится рядом: заново у ElevenLabs фраза не просится.
+    private static func cached(_ file: URL, words wordsFile: URL, text: String) -> NeuralAudio? {
         guard let data = try? Data(contentsOf: file), !data.isEmpty else { return nil }
         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
-        let words = (try? Data(contentsOf: wordsFile)).flatMap { try? JSONDecoder().decode([SpeechWord].self, from: $0) }
-        if words != nil { try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: wordsFile.path) }
+        if let words = (try? Data(contentsOf: wordsFile)).flatMap({ try? JSONDecoder().decode([SpeechWord].self, from: $0) }) {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: wordsFile.path)
+            return NeuralAudio(data: data, words: words)
+        }
+        let words = SpeechAlignment.words(in: text, audio: file)
+        save(words, to: wordsFile)
         return NeuralAudio(data: data, words: words)
+    }
+
+    private static func save(_ words: [SpeechWord]?, to file: URL) {
+        guard let words, let json = try? JSONEncoder().encode(words) else { return }
+        try? json.write(to: file, options: .atomic)
     }
 
     /// Убирает самые давние файлы, пока кеш не станет меньше предела.
