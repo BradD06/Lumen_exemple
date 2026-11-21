@@ -39,6 +39,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     /// `AVAudioPlayer` ускоряет без смены тона только до 2×.
     public nonisolated static let rates: ClosedRange<Double> = 0.5...2
     private static let lookahead = 2
+    static let wordLead = 0.12
 
     private var audio: AVAudioPlayer?
     private var audioIndex: Int?
@@ -174,7 +175,8 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
             var shown: Int?
             while !Task.isCancelled {
                 guard let self, let audio = self.audio, ObjectIdentifier(audio) == id else { return }
-                if let word = SpeechTiming.index(at: audio.currentTime, in: words), word != shown {
+                // Чуть наперёд: пока подсветка дойдёт до страницы, голос уже начнёт слово.
+                if let word = SpeechTiming.index(at: audio.currentTime + Self.wordLead, in: words), word != shown {
                     shown = word
                     self.onWord?(number, words[word].range)
                 }

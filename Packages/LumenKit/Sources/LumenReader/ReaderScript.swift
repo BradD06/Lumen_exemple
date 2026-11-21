@@ -408,21 +408,56 @@ enum ReaderScript {
       for (const name of ['wheel', 'touchstart', 'keydown', 'mousedown']) {
         window.addEventListener(name, () => { touched = Date.now(); }, { passive: true, capture: true });
       }
-      const spoken = window.Highlight && window.CSS && CSS.highlights ? CSS.highlights : null;
+      // Подсветка голоса — отдельный слой под текстом: у каждого слова своя скруглённая плашка
+      // чуть больше слова (у CSS-выделения скруглений и отступов не бывает).
+      let speechLayer = null;
+      let speechWords = [];
+      let speechWord = null;
+      function speechBox() {
+        if (speechLayer && speechLayer.isConnected) { return speechLayer; }
+        speechLayer = document.createElement('div');
+        speechLayer.id = 'lumen-speech';
+        speechLayer.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(speechLayer);
+        return speechLayer;
+      }
+      function plates(ranges, kind) {
+        const base = document.body.getBoundingClientRect();
+        const left = base.left + document.body.clientLeft;
+        const top = base.top + document.body.clientTop;
+        let html = '';
+        for (const range of ranges) {
+          for (const r of range.getClientRects()) {
+            if (r.width < 1 || r.height < 1) { continue; }
+            html += '<div class="' + kind + '" style="left:' + (r.left - left - 3) + 'px;top:' + (r.top - top - 1)
+              + 'px;width:' + (r.width + 6) + 'px;height:' + (r.height + 2) + 'px"></div>';
+          }
+        }
+        return html;
+      }
+      function drawSpeech() {
+        if (!speechWords.length && !speechWord) {
+          if (speechLayer) { speechLayer.innerHTML = ''; }
+          return;
+        }
+        speechBox().innerHTML = plates(speechWords, 'word') + (speechWord ? plates([speechWord], 'word now') : '');
+      }
+      // Шрифт, размер окна, догрузились картинки: плашки встают заново на свои слова.
+      window.addEventListener('resize', () => drawSpeech());
+      if (window.ResizeObserver) { new ResizeObserver(() => drawSpeech()).observe(document.body); }
+
       function speak(start, end, follow) {
         const range = rangeOf(start, end);
         if (!range) { return false; }
-        if (spoken) {
-          const words = wordRangesOf(start, end);
-          spoken.set('lumen-now', new Highlight(...(words.length ? words : [range])));
-          spoken.delete('lumen-word');
-          // Сохранённое выделение под звучащей фразой на это время прячется: две заливки
-          // одна поверх другой выглядят грязно.
-          quietMarks(words);
-        }
+        const words = wordRangesOf(start, end);
+        speechWords = words.length ? words : [range];
+        speechWord = null;
+        drawSpeech();
+        // Сохранённое выделение под звучащей фразой на это время прячется: две заливки
+        // одна поверх другой выглядят грязно.
+        quietMarks(words);
         return keepInView(range, start, follow);
       }
-      // Звучащее слово внутри фразы: голос идёт, и подсветка за ним.
       function quietMarks(words) {
         for (const mark of Array.from(document.querySelectorAll('mark.lumen-hl.lumen-reading'))) {
           mark.classList.remove('lumen-reading');
@@ -433,10 +468,12 @@ enum ReaderScript {
           if (mark) { mark.classList.add('lumen-reading'); }
         }
       }
+      // Звучащее слово внутри фразы: голос идёт, и плашка ярче идёт за ним.
       function speakWord(start, end, follow) {
         const range = rangeOf(start, end);
         if (!range) { return false; }
-        if (spoken) { spoken.set('lumen-word', new Highlight(range)); }
+        speechWord = range;
+        drawSpeech();
         return keepInView(range, start, follow);
       }
       function keepInView(range, start, follow) {
@@ -456,7 +493,9 @@ enum ReaderScript {
         speak: speak,
         speakWord: speakWord,
         unspeak: () => {
-          if (spoken) { spoken.delete('lumen-now'); spoken.delete('lumen-word'); }
+          speechWords = [];
+          speechWord = null;
+          drawSpeech();
           quietMarks([]);
         },
         topOffset: () => topOffset(),
@@ -631,8 +670,10 @@ public struct ReaderAppearance: Hashable, Sendable {
         }
         mark.lumen-hl.lumen-flash { background: color-mix(in srgb, var(--lumen-hl) 75%, transparent) !important; }
         mark.lumen-hl.lumen-reading { background: transparent !important; }
-        ::highlight(lumen-now) { background-color: rgba(124, 122, 255, 0.2); }
-        ::highlight(lumen-word) { background-color: rgba(124, 122, 255, 0.45); }
+        body { position: relative; z-index: 0; }
+        #lumen-speech { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: -1; pointer-events: none; }
+        #lumen-speech div { position: absolute; border-radius: 7px; background-color: rgba(124, 122, 255, 0.2) !important; }
+        #lumen-speech div.now { background-color: rgba(124, 122, 255, 0.5) !important; }
         """
         switch palette {
         case .night:
