@@ -386,7 +386,20 @@ enum ReaderScript {
       function speak(start, end, follow) {
         const range = rangeOf(start, end);
         if (!range) { return false; }
-        if (spoken) { spoken.set('lumen-now', new Highlight(range)); }
+        if (spoken) {
+          spoken.set('lumen-now', new Highlight(range));
+          spoken.delete('lumen-word');
+        }
+        return keepInView(range, start, follow);
+      }
+      // Звучащее слово внутри фразы: голос идёт, и подсветка за ним.
+      function speakWord(start, end, follow) {
+        const range = rangeOf(start, end);
+        if (!range) { return false; }
+        if (spoken) { spoken.set('lumen-word', new Highlight(range)); }
+        return keepInView(range, start, follow);
+      }
+      function keepInView(range, start, follow) {
         if (!follow || Date.now() - touched < 4000) { return true; }
         const rect = range.getBoundingClientRect();
         if (rect.height === 0) { return true; }
@@ -401,7 +414,8 @@ enum ReaderScript {
       window.lumen = {
         speechBlocks: speechBlocks,
         speak: speak,
-        unspeak: () => { if (spoken) { spoken.delete('lumen-now'); } },
+        speakWord: speakWord,
+        unspeak: () => { if (spoken) { spoken.delete('lumen-now'); spoken.delete('lumen-word'); } },
         topOffset: () => topOffset(),
         turn: (direction) => turn(direction),
         setStyle: (css) => { style.textContent = css; },
@@ -574,6 +588,7 @@ public struct ReaderAppearance: Hashable, Sendable {
         }
         mark.lumen-hl.lumen-flash { background: color-mix(in srgb, var(--lumen-hl) 75%, transparent) !important; }
         ::highlight(lumen-now) { background-color: rgba(124, 122, 255, 0.28); }
+        ::highlight(lumen-word) { background-color: rgba(124, 122, 255, 0.42); }
         """
         switch palette {
         case .night:

@@ -211,6 +211,7 @@ final class ReadAloud {
         neural.onFailure = { [weak self] error in self?.neuralFailed(error) }
         for voice in [apple, neural] as [any SpeechPlaying] {
             voice.onPart = { [weak self] number in self?.didStart(number) }
+            voice.onWord = { [weak self] number, range in self?.didSpeak(range, of: number) }
             voice.onFinish = { [weak self] in self?.chapterFinished() }
         }
         playingNeural = usesNeural
@@ -400,6 +401,22 @@ final class ReadAloud {
         mark(part, follow: UserDefaults.standard.object(forKey: Self.followKey) as? Bool ?? true)
         if let reader, reader.section == chapterSection { reader.listened(to: part) }
         updateNowPlaying()
+    }
+
+    /// Слова звучащей фразы и их места в главе: считаются раз на фразу.
+    @ObservationIgnored private var wordPlaces: (part: SpeechPart, places: [SpeechWordPlace])?
+
+    /// Голос дошёл до слова: подсветка идёт за ним внутри фразы.
+    private func didSpeak(_ range: NSRange, of number: Int) {
+        guard number == index, parts.indices.contains(number), let reader, reader.section == chapterSection,
+              UserDefaults.standard.object(forKey: Self.highlightKey) as? Bool ?? true else { return }
+        let part = parts[number]
+        if wordPlaces?.part != part {
+            wordPlaces = (part, SpeechTiming.places(of: part))
+        }
+        guard let places = wordPlaces?.places, let word = SpeechTiming.chapterRange(of: range, in: places) else { return }
+        let follow = UserDefaults.standard.object(forKey: Self.followKey) as? Bool ?? true
+        reader.web.markSpokenWord(start: word.location, end: word.location + word.length, follow: follow)
     }
 
     private func mark(_ part: SpeechPart, follow: Bool) {

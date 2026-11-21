@@ -177,6 +177,12 @@ public final class WebReaderController: NSObject {
         webView.evaluateJavaScript("window.lumen && window.lumen.speak && window.lumen.speak(\(start), \(end), \(follow))")
     }
 
+    /// Подсвечивает звучащее слово внутри фразы.
+    public func markSpokenWord(start: Int, end: Int, follow: Bool) {
+        guard isReady else { return }
+        webView.evaluateJavaScript("window.lumen && window.lumen.speakWord && window.lumen.speakWord(\(start), \(end), \(follow))")
+    }
+
     public func clearSpoken() {
         guard isReady else { return }
         webView.evaluateJavaScript("window.lumen && window.lumen.unspeak && window.lumen.unspeak()")
