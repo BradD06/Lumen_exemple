@@ -422,9 +422,11 @@ enum ReaderScript {
         return speechLayer;
       }
       function plates(ranges, kind) {
-        const base = document.body.getBoundingClientRect();
-        const left = base.left + document.body.clientLeft;
-        const top = base.top + document.body.clientTop;
+        // Отсчёт от самого слоя: у body стиль книги или читалки может быть любым
+        // (static, отступы, по центру), а слой всегда знает, где его ноль.
+        const base = speechBox().getBoundingClientRect();
+        const left = base.left;
+        const top = base.top;
         let html = '';
         for (const range of ranges) {
           for (const r of range.getClientRects()) {
@@ -670,7 +672,7 @@ public struct ReaderAppearance: Hashable, Sendable {
         }
         mark.lumen-hl.lumen-flash { background: color-mix(in srgb, var(--lumen-hl) 75%, transparent) !important; }
         mark.lumen-hl.lumen-reading { background: transparent !important; }
-        body { position: relative; z-index: 0; }
+        body { isolation: isolate; }
         #lumen-speech { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: -1; pointer-events: none; }
         #lumen-speech div { position: absolute; border-radius: 7px; background-color: rgba(124, 122, 255, 0.2) !important; }
         #lumen-speech div.now { background-color: rgba(124, 122, 255, 0.5) !important; }
