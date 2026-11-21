@@ -377,6 +377,32 @@ enum ReaderScript {
         return started ? range : null;
       }
 
+      // Слова куска главы по отдельности: фраза, которую читает голос, подсвечивается
+      // по словам, пробелы и знаки между ними остаются без заливки.
+      const wordPattern = /[\p{L}\p{N}\u00AD]+/gu;
+      function wordRangesOf(start, end) {
+        const ranges = [];
+        let position = 0;
+        for (const node of textNodes()) {
+          const length = node.data.length;
+          if (position + length > start && position < end) {
+            const from = Math.max(start - position, 0);
+            const text = node.data.slice(from, Math.min(end - position, length));
+            wordPattern.lastIndex = 0;
+            let match;
+            while ((match = wordPattern.exec(text))) {
+              const range = document.createRange();
+              range.setStart(node, from + match.index);
+              range.setEnd(node, from + match.index + match[0].length);
+              ranges.push(range);
+            }
+          }
+          position += length;
+          if (position >= end) { break; }
+        }
+        return ranges;
+      }
+
       // Читатель сам листает: несколько секунд книга не прокручивается за голосом.
       let touched = 0;
       for (const name of ['wheel', 'touchstart', 'keydown', 'mousedown']) {
@@ -387,12 +413,26 @@ enum ReaderScript {
         const range = rangeOf(start, end);
         if (!range) { return false; }
         if (spoken) {
-          spoken.set('lumen-now', new Highlight(range));
+          const words = wordRangesOf(start, end);
+          spoken.set('lumen-now', new Highlight(...(words.length ? words : [range])));
           spoken.delete('lumen-word');
+          // Сохранённое выделение под звучащей фразой на это время прячется: две заливки
+          // одна поверх другой выглядят грязно.
+          quietMarks(words);
         }
         return keepInView(range, start, follow);
       }
       // Звучащее слово внутри фразы: голос идёт, и подсветка за ним.
+      function quietMarks(words) {
+        for (const mark of Array.from(document.querySelectorAll('mark.lumen-hl.lumen-reading'))) {
+          mark.classList.remove('lumen-reading');
+        }
+        for (const word of words) {
+          const parent = word.startContainer.parentElement;
+          const mark = parent && parent.closest ? parent.closest('mark.lumen-hl') : null;
+          if (mark) { mark.classList.add('lumen-reading'); }
+        }
+      }
       function speakWord(start, end, follow) {
         const range = rangeOf(start, end);
         if (!range) { return false; }
@@ -415,7 +455,10 @@ enum ReaderScript {
         speechBlocks: speechBlocks,
         speak: speak,
         speakWord: speakWord,
-        unspeak: () => { if (spoken) { spoken.delete('lumen-now'); spoken.delete('lumen-word'); } },
+        unspeak: () => {
+          if (spoken) { spoken.delete('lumen-now'); spoken.delete('lumen-word'); }
+          quietMarks([]);
+        },
         topOffset: () => topOffset(),
         turn: (direction) => turn(direction),
         setStyle: (css) => { style.textContent = css; },
@@ -582,13 +625,14 @@ public struct ReaderAppearance: Hashable, Sendable {
         .slide-number { position: absolute; top: 10px; right: 16px; font-size: 12px; opacity: 0.5; }
         mark.lumen-hl {
           background: color-mix(in srgb, var(--lumen-hl) 40%, transparent) !important;
-          color: inherit !important; border-radius: 7px; padding: 1px 3px; cursor: pointer;
+          color: inherit !important; border-radius: 3px; padding: 0; cursor: pointer;
           -webkit-box-decoration-break: clone; box-decoration-break: clone;
           transition: background 0.4s;
         }
         mark.lumen-hl.lumen-flash { background: color-mix(in srgb, var(--lumen-hl) 75%, transparent) !important; }
-        ::highlight(lumen-now) { background-color: rgba(124, 122, 255, 0.28); }
-        ::highlight(lumen-word) { background-color: rgba(124, 122, 255, 0.42); }
+        mark.lumen-hl.lumen-reading { background: transparent !important; }
+        ::highlight(lumen-now) { background-color: rgba(124, 122, 255, 0.2); }
+        ::highlight(lumen-word) { background-color: rgba(124, 122, 255, 0.45); }
         """
         switch palette {
         case .night:
