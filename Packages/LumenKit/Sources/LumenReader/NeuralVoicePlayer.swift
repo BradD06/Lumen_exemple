@@ -1,13 +1,15 @@
 import AVFoundation
 import Foundation
 
-/// Читает части главы голосом ElevenLabs: каждая фраза приходит mp3-файлом (или из кеша)
-/// и играет через `AVAudioPlayer`. Пока звучит фраза, следующие две скачиваются по очереди
-/// (бесплатный тариф не любит много запросов сразу), поэтому между фразами нет пауз.
+/// Читает части главы голосом ElevenLabs: каждая фраза приходит mp3-файлом со временем слов
+/// (или из кеша) и играет через `AVAudioPlayer`, а `onWord` говорит, какое слово звучит.
+/// Пока звучит фраза, следующие две скачиваются по очереди (бесплатный тариф не любит много
+/// запросов сразу), поэтому между фразами нет пауз.
 /// Не получилось (нет сети, ключ, кончились знаки) — `onFailure`, и читалка переходит на голос Apple.
 @MainActor
 public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     public var onPart: ((Int) -> Void)?
+    public var onWord: ((Int, NSRange) -> Void)?
     public var onFinish: (() -> Void)?
     public var onFailure: ((NeuralVoiceError) -> Void)?
 
@@ -40,10 +42,12 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
 
     private var audio: AVAudioPlayer?
     private var audioIndex: Int?
-    private var loads: [Int: Task<Data, any Error>] = [:]
+    private var loads: [Int: Task<NeuralAudio, any Error>] = [:]
     /// Растёт при каждом переходе: опоздавшая загрузка старой фразы ничего не включит.
     private var generation = 0
     private var startTask: Task<Void, Never>?
+    /// Следит за временем звучащей фразы и сообщает, какое слово звучит.
+    private var wordTask: Task<Void, Never>?
     private let delegate = Delegate()
 
     public override init() {
@@ -115,6 +119,8 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         generation += 1
         startTask?.cancel()
         startTask = nil
+        wordTask?.cancel()
+        wordTask = nil
         audio?.stop()
         audio = nil
         audioIndex = nil
@@ -132,14 +138,15 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         audio?.stop()
         audio = nil
         audioIndex = nil
+        wordTask?.cancel()
         startTask?.cancel()
         startTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard let self, self.generation == current else { return }
             do {
-                let data = try await self.load(number)
+                let sound = try await self.load(number)
                 guard self.generation == current, self.isPlaying else { return }
-                let player = try AVAudioPlayer(data: data)
+                let player = try AVAudioPlayer(data: sound.data)
                 player.enableRate = true
                 player.rate = Float(Self.playbackRate(self.rate))
                 player.delegate = self.delegate
@@ -148,6 +155,8 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
                 self.audioIndex = number
                 if !self.isPaused { player.play() }
                 self.onPart?(number)
+                self.followWords(of: player, part: number, words: sound.words
+                    ?? SpeechTiming.estimated(in: self.parts[number].spoken, duration: player.duration))
                 self.prefetch(after: number, generation: current)
             } catch {
                 guard self.generation == current, !(error is CancellationError) else { return }
@@ -156,7 +165,25 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         }
     }
 
-    private func load(_ number: Int) async throws -> Data {
+    /// Пока фраза звучит, раз в 50 мс смотрит время и сообщает новое слово.
+    private func followWords(of player: AVAudioPlayer, part number: Int, words: [SpeechWord]) {
+        wordTask?.cancel()
+        guard !words.isEmpty else { return }
+        let id = ObjectIdentifier(player)
+        wordTask = Task { [weak self] in
+            var shown: Int?
+            while !Task.isCancelled {
+                guard let self, let audio = self.audio, ObjectIdentifier(audio) == id else { return }
+                if let word = SpeechTiming.index(at: audio.currentTime, in: words), word != shown {
+                    shown = word
+                    self.onWord?(number, words[word].range)
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    private func load(_ number: Int) async throws -> NeuralAudio {
         if let task = loads[number] { return try await task.value }
         guard let key = apiKey(), !key.isEmpty else { throw NeuralVoiceError.noKey }
         guard let voiceId else { throw NeuralVoiceError.noVoice }
@@ -202,6 +229,8 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
 
     fileprivate func finished(_ id: ObjectIdentifier) {
         guard let audio, ObjectIdentifier(audio) == id, let number = audioIndex else { return }
+        wordTask?.cancel()
+        wordTask = nil
         self.audio = nil
         audioIndex = nil
         if number + 1 >= parts.count {
@@ -242,10 +271,10 @@ public final class NeuralVoiceSample {
 
     public func play(voiceId: String, model: NeuralVoiceModel, tuning: NeuralVoiceTuning, key: String) async throws {
         let speech = NeuralSpeechRequest(text: Self.text, voiceId: voiceId, model: model, tuning: tuning, language: "ru")
-        let data = try await NeuralVoiceCache.audio(for: speech, key: key)
+        let sound = try await NeuralVoiceCache.audio(for: speech, key: key)
         player?.stop()
         SpeechAudio.activate()
-        player = try AVAudioPlayer(data: data)
+        player = try AVAudioPlayer(data: sound.data)
         player?.play()
     }
 

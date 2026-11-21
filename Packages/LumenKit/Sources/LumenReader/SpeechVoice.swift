@@ -72,6 +72,8 @@ public enum SpeechVoices {
 public protocol SpeechPlaying: AnyObject {
     /// Началась часть с этим номером.
     var onPart: ((Int) -> Void)? { get set }
+    /// Звучит слово части: номер части и место слова в её сказанном тексте (UTF-16).
+    var onWord: ((Int, NSRange) -> Void)? { get set }
     /// Части кончились.
     var onFinish: (() -> Void)? { get set }
     var isPlaying: Bool { get }
@@ -101,6 +103,7 @@ enum SpeechAudio {
 public final class SpeechVoicePlayer: NSObject, SpeechPlaying {
     /// Началась часть с этим номером.
     public var onPart: ((Int) -> Void)?
+    public var onWord: ((Int, NSRange) -> Void)?
     /// Части кончились.
     public var onFinish: (() -> Void)?
 
@@ -235,6 +238,11 @@ public final class SpeechVoicePlayer: NSObject, SpeechPlaying {
         onPart?(number)
     }
 
+    fileprivate func willSpeak(_ range: NSRange, of id: ObjectIdentifier) {
+        guard let number = queued[id]?.index, number == index else { return }
+        onWord?(number, range)
+    }
+
     fileprivate func didFinish(_ id: ObjectIdentifier) {
         guard let number = queued.removeValue(forKey: id)?.index else { return }
         if number + 1 >= parts.count {
@@ -254,6 +262,11 @@ public final class SpeechVoicePlayer: NSObject, SpeechPlaying {
         func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
             let id = ObjectIdentifier(utterance)
             Task { @MainActor in self.player?.didStart(id) }
+        }
+
+        func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
+            let id = ObjectIdentifier(utterance)
+            Task { @MainActor in self.player?.willSpeak(characterRange, of: id) }
         }
 
         func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {

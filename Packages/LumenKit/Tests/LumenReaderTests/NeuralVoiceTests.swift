@@ -145,18 +145,46 @@ struct NeuralVoiceTests {
         }
         let counter = Counter()
         let fetches = NeuralVoiceFetches()
-        let make: @Sendable () async throws -> Data = {
+        let sound = NeuralAudio(data: Data("mp3".utf8), words: nil)
+        let make: @Sendable () async throws -> NeuralAudio = {
             await counter.hit()
             try await Task.sleep(for: .milliseconds(200))
-            return Data("mp3".utf8)
+            return sound
         }
-        let first = Task { try await fetches.data(for: "k", make: make) }
+        let first = Task { try await fetches.audio(for: "k", make: make) }
         try await Task.sleep(for: .milliseconds(20))
         first.cancel()
-        let second = try await fetches.data(for: "k", make: make)
-        #expect(second == Data("mp3".utf8))
-        #expect(try await first.value == Data("mp3".utf8))
+        let second = try await fetches.audio(for: "k", make: make)
+        #expect(second == sound)
+        #expect(try await first.value == sound)
         #expect(await counter.calls == 1)
+    }
+
+    @Test func timedRequestAsksForTimestampsAsJSON() {
+        let client = ElevenLabsClient(apiKey: "sk_test")
+        let speech = NeuralSpeechRequest(text: "Фраза.", voiceId: "voice1", model: .v3)
+        let request = client.speechRequest(speech, timed: true)
+        #expect(request.url?.path() == "/v1/text-to-speech/voice1/with-timestamps")
+        #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+    }
+
+    /// Ответ со временем букв превращается в mp3 и секунды начала слов.
+    @Test func timedAnswerGivesAudioAndWordTimes() throws {
+        let text = "Да, нет"
+        let characters = text.map { String($0) }
+        let starts = [0.0, 0.1, 0.2, 0.3, 0.5, 0.6, 0.7]
+        let answer: [String: Any] = [
+            "audio_base64": Data("mp3".utf8).base64EncodedString(),
+            "alignment": ["characters": characters, "character_start_times_seconds": starts, "character_end_times_seconds": starts],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: answer)
+        let audio = try ElevenLabsClient.parseTimedSpeech(data, text: text)
+        #expect(audio.data == Data("mp3".utf8))
+        #expect(audio.words == [
+            SpeechWord(location: 0, length: 2, time: 0.0),
+            SpeechWord(location: 4, length: 3, time: 0.5),
+        ])
+        #expect(throws: NeuralVoiceError.self) { try ElevenLabsClient.parseTimedSpeech(Data("{}".utf8), text: text) }
     }
 
     @Test func maskedKeyShowsOnlyTheEnd() {

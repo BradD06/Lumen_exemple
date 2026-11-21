@@ -209,6 +209,12 @@ public struct ElevenLabsClient: Sendable {
         try await send(speechRequest(speech))
     }
 
+    /// Звук фразы вместе со временем каждой буквы: по нему подсветка идёт за голосом по словам.
+    /// Стоит столько же знаков, сколько обычная озвучка.
+    public func timedSpeech(_ speech: NeuralSpeechRequest) async throws -> NeuralAudio {
+        try Self.parseTimedSpeech(await send(speechRequest(speech, timed: true)), text: speech.text)
+    }
+
     // MARK: Запросы
 
     func request(path: String) -> URLRequest {
@@ -218,12 +224,12 @@ public struct ElevenLabsClient: Sendable {
         return request
     }
 
-    func speechRequest(_ speech: NeuralSpeechRequest) -> URLRequest {
-        var request = request(path: "/v1/text-to-speech/\(speech.voiceId)")
+    func speechRequest(_ speech: NeuralSpeechRequest, timed: Bool = false) -> URLRequest {
+        var request = request(path: "/v1/text-to-speech/\(speech.voiceId)" + (timed ? "/with-timestamps" : ""))
         request.url = request.url?.appending(queryItems: [URLQueryItem(name: "output_format", value: "mp3_44100_128")])
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
+        request.setValue(timed ? "application/json" : "audio/mpeg", forHTTPHeaderField: "Accept")
         var body: [String: Any] = [
             "text": speech.text,
             "model_id": speech.model.rawValue,
@@ -285,6 +291,19 @@ public struct ElevenLabsClient: Sendable {
         return voices.filter(\.isNarration) + voices.filter { !$0.isNarration }
     }
 
+    /// Ответ `with-timestamps`: mp3 в base64 и время букв исходного текста.
+    static func parseTimedSpeech(_ data: Data, text: String) throws -> NeuralAudio {
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        guard let base64 = object["audio_base64"] as? String, let audio = Data(base64Encoded: base64), !audio.isEmpty else {
+            throw NeuralVoiceError.server(0, "нет звука в ответе")
+        }
+        let alignment = (object["alignment"] as? [String: Any]) ?? (object["normalized_alignment"] as? [String: Any])
+        let characters = alignment?["characters"] as? [String] ?? []
+        let starts = (alignment?["character_start_times_seconds"] as? [NSNumber] ?? []).map(\.doubleValue)
+        let words = SpeechTiming.words(in: text, characters: characters, starts: starts)
+        return NeuralAudio(data: audio, words: words.isEmpty ? nil : words)
+    }
+
     static func parseError(status: Int, data: Data) -> NeuralVoiceError {
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         let detail = object?["detail"]
@@ -326,6 +345,17 @@ public struct ElevenLabsClient: Sendable {
     }
 }
 
+/// Озвученная фраза: mp3 и, если ElevenLabs их дал, секунды начала слов.
+public struct NeuralAudio: Sendable, Equatable {
+    public var data: Data
+    public var words: [SpeechWord]?
+
+    public init(data: Data, words: [SpeechWord]?) {
+        self.data = data
+        self.words = words
+    }
+}
+
 /// Озвученные фразы на диске (Caches/LumenReader/voice): второй раз та же фраза знаков не тратит.
 public enum NeuralVoiceCache {
     /// Сколько держать: старые файлы удаляются, когда кеш перерастает предел.
@@ -336,33 +366,53 @@ public enum NeuralVoiceCache {
             .appending(path: "LumenReader/voice", directoryHint: .isDirectory)
     }
 
-    /// Звук фразы: из кеша, а нет — у ElevenLabs (с одной повторной попыткой, если сервис занят).
-    /// Сама загрузка не отменяется вместе с вызвавшим (пауза, переход, смена главы): ElevenLabs
-    /// списывает знаки, как только начал озвучивать, поэтому звук всегда дописывается в кеш.
-    public static func audio(for speech: NeuralSpeechRequest, key: String) async throws -> Data {
+    /// Звук фразы и время слов: из кеша, а нет — у ElevenLabs (с одной повторной попыткой,
+    /// если сервис занят). Сама загрузка не отменяется вместе с вызвавшим (пауза, переход,
+    /// смена главы): ElevenLabs списывает знаки, как только начал озвучивать, поэтому звук
+    /// всегда дописывается в кеш. Звук из старого кеша, без времени слов, заново не просится.
+    public static func audio(for speech: NeuralSpeechRequest, key: String) async throws -> NeuralAudio {
         let file = directory.appending(path: speech.cacheKey + ".mp3")
-        if let data = cached(file) { return data }
-        return try await NeuralVoiceFetches.shared.data(for: speech.cacheKey) {
+        let wordsFile = directory.appending(path: speech.cacheKey + ".words.json")
+        if let audio = cached(file, words: wordsFile) { return audio }
+        return try await NeuralVoiceFetches.shared.audio(for: speech.cacheKey) {
             // Пока ждали очереди, фраза могла уже лечь в кеш.
-            if let data = cached(file) { return data }
-            let client = ElevenLabsClient(apiKey: key)
-            let data: Data
+            if let audio = cached(file, words: wordsFile) { return audio }
+            let audio: NeuralAudio
             do {
-                data = try await client.speech(speech)
+                audio = try await fetch(speech, key: key)
             } catch NeuralVoiceError.busy {
                 try await Task.sleep(for: .seconds(1.5))
-                data = try await client.speech(speech)
+                audio = try await fetch(speech, key: key)
             }
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try? data.write(to: file, options: .atomic)
-            return data
+            try? audio.data.write(to: file, options: .atomic)
+            if let words = audio.words, let json = try? JSONEncoder().encode(words) {
+                try? json.write(to: wordsFile, options: .atomic)
+            }
+            return audio
         }
     }
 
-    private static func cached(_ file: URL) -> Data? {
+    /// Сначала со временем слов; если модель так не умеет (ответ 400, 404, 422, нет звука
+    /// в ответе), обычный звук, и дальше для этой модели сразу обычный. Отказ знаков не тратит.
+    private static func fetch(_ speech: NeuralSpeechRequest, key: String) async throws -> NeuralAudio {
+        let client = ElevenLabsClient(apiKey: key)
+        if await !NeuralVoiceFetches.shared.isUntimed(speech.model) {
+            do {
+                return try await client.timedSpeech(speech)
+            } catch NeuralVoiceError.server(let status, _) where [0, 400, 404, 405, 415, 422].contains(status) {
+                await NeuralVoiceFetches.shared.markUntimed(speech.model)
+            }
+        }
+        return NeuralAudio(data: try await client.speech(speech), words: nil)
+    }
+
+    private static func cached(_ file: URL, words wordsFile: URL) -> NeuralAudio? {
         guard let data = try? Data(contentsOf: file), !data.isEmpty else { return nil }
         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
-        return data
+        let words = (try? Data(contentsOf: wordsFile)).flatMap { try? JSONDecoder().decode([SpeechWord].self, from: $0) }
+        if words != nil { try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: wordsFile.path) }
+        return NeuralAudio(data: data, words: words)
     }
 
     /// Убирает самые давние файлы, пока кеш не станет меньше предела.
@@ -399,9 +449,14 @@ public enum NeuralVoiceCache {
 actor NeuralVoiceFetches {
     static let shared = NeuralVoiceFetches()
 
-    private var running: [String: Task<Data, any Error>] = [:]
+    private var running: [String: Task<NeuralAudio, any Error>] = [:]
+    /// Модели, которые не отдали время слов: им сразу обычный запрос.
+    private var untimed: Set<NeuralVoiceModel> = []
 
-    func data(for key: String, make: @escaping @Sendable () async throws -> Data) async throws -> Data {
+    func isUntimed(_ model: NeuralVoiceModel) -> Bool { untimed.contains(model) }
+    func markUntimed(_ model: NeuralVoiceModel) { untimed.insert(model) }
+
+    func audio(for key: String, make: @escaping @Sendable () async throws -> NeuralAudio) async throws -> NeuralAudio {
         if let task = running[key] { return try await task.value }
         let task = Task.detached(priority: .userInitiated) { try await make() }
         running[key] = task
