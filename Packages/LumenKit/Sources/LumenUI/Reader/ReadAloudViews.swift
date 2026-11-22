@@ -281,9 +281,9 @@ struct ReadAloudPanel: View {
         @Bindable var model = ReadAloud.shared
         ScrollView {
             VStack(alignment: .leading, spacing: 6) {
-                if readAloud.hasNeuralKey {
+                if readAloud.availableEngines.count > 1 {
                     HStack(spacing: 6) {
-                        ForEach(ReadAloud.VoiceEngine.allCases, id: \.self) { engine in
+                        ForEach(readAloud.availableEngines, id: \.self) { engine in
                             choice(engine.title, isOn: readAloud.engine == engine) {
                                 readAloud.engine = engine
                             }
@@ -291,10 +291,10 @@ struct ReadAloudPanel: View {
                     }
                     .padding(.bottom, 6)
                 }
-                if readAloud.hasNeuralKey, readAloud.engine == .elevenLabs {
-                    neuralVoices
-                } else {
-                    appleVoices
+                switch readAloud.engine {
+                case .elevenLabs where readAloud.hasNeuralKey: neuralVoices
+                case .lumen where readAloud.lumenServer != nil: lumenVoices
+                default: appleVoices
                 }
 
                 HStack {
@@ -362,6 +362,45 @@ struct ReadAloudPanel: View {
         }
         hint("Скорость нейроголоса до 2×. Уже прочитанное хранится на устройстве и второй раз знаков не тратит.")
             .task { await loadVoices() }
+    }
+
+    @ViewBuilder
+    private var lumenVoices: some View {
+        label("Голос Lumen · с вашего компьютера")
+        if readAloud.fallbackToApple {
+            hint("Компьютер с голосом не ответил, глава звучит голосом Apple. Выберите голос, чтобы попробовать снова.")
+        } else if !LumenVoiceServer.supports(readAloud.language) {
+            hint("Этот язык голос Lumen пока не читает, книгу читает голос Apple.")
+        }
+        if readAloud.lumenVoices.isEmpty {
+            if isLoadingVoices {
+                ProgressView().controlSize(.small).padding(8)
+            } else if let neuralError {
+                hint(neuralError)
+            }
+            if let name = readAloud.lumenVoiceName {
+                voiceRow(name, "", isOn: true) {}
+            }
+        }
+        ForEach(readAloud.lumenVoices) { voice in
+            voiceRow(voice.name, "", isOn: voice.id == readAloud.lumenVoiceId) {
+                readAloud.chooseLumenVoice(voice)
+            }
+        }
+        hint("Скорость до 2×. Компьютер должен быть включён, а на этом устройстве включён Tailscale.")
+            .task { await loadLumenVoices() }
+    }
+
+    private func loadLumenVoices() async {
+        guard readAloud.lumenVoices.isEmpty, !isLoadingVoices else { return }
+        isLoadingVoices = true
+        defer { isLoadingVoices = false }
+        do {
+            try await readAloud.loadLumenVoices()
+            neuralError = nil
+        } catch {
+            neuralError = "Не удалось загрузить голоса: \(error.localizedDescription)"
+        }
     }
 
     private func loadVoices() async {
