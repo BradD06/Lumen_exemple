@@ -458,6 +458,7 @@ struct SettingsSheet: View {
                 AppearanceSection()
                 ScreenOptionsSection()
                 ReadAloudSettingsSection()
+                LumenVoiceSettingsSection()
                 NeuralVoiceSettingsSection()
                 Section {
                     Toggle("Звуки кабинета", isOn: $soundsEnabled)

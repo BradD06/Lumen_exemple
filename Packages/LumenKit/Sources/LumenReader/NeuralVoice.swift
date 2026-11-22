@@ -119,6 +119,12 @@ public enum NeuralVoiceError: Error, Equatable, LocalizedError {
     case paidPlanRequired
     case busy
     case offline
+    /// Свой сервер голоса не ответил: компьютер выключен, окно сервера закрыто или Tailscale выключен.
+    case serverUnreachable
+    /// Свой сервер голоса ответил, но модель ещё запускается или упала.
+    case voiceStarting
+    /// В поле адреса сервера голоса не адрес.
+    case badAddress
     case keychain(Int32)
     case server(Int, String)
 
@@ -132,6 +138,9 @@ public enum NeuralVoiceError: Error, Equatable, LocalizedError {
         case .paidPlanRequired: "этот голос недоступен на вашем тарифе ElevenLabs или закончились кредиты. На бесплатном тарифе работают только стандартные голоса ElevenLabs, не голоса из библиотеки."
         case .busy: "сервис сейчас перегружен, попробуйте чуть позже."
         case .offline: "нет интернета."
+        case .serverUnreachable: "компьютер с голосом не отвечает. Проверьте, что он включён и окно «Голос Lumen» открыто, а на этом устройстве включён Tailscale."
+        case .voiceStarting: "голос на компьютере ещё запускается, попробуйте через минуту."
+        case .badAddress: "не вижу адреса сервера. Вставьте ссылку из окна «Голос Lumen» на компьютере."
         case .keychain(let status): "не удалось сохранить ключ в Связке ключей (код \(status))."
         case .server(let code, let message): message.isEmpty ? "ошибка сервиса (\(code))." : "ошибка сервиса (\(code)): \(message)"
         }
@@ -371,26 +380,45 @@ public enum NeuralVoiceCache {
     /// смена главы): ElevenLabs списывает знаки, как только начал озвучивать, поэтому звук
     /// всегда дописывается в кеш. Звук из старого кеша, без времени слов, заново не просится.
     public static func audio(for speech: NeuralSpeechRequest, key: String) async throws -> NeuralAudio {
-        let file = directory.appending(path: speech.cacheKey + ".mp3")
-        let wordsFile = directory.appending(path: speech.cacheKey + ".words.json")
-        if let audio = cached(file, words: wordsFile, text: speech.text) { return audio }
-        return try await NeuralVoiceFetches.shared.audio(for: speech.cacheKey) {
-            // Пока ждали очереди, фраза могла уже лечь в кеш.
-            if let audio = cached(file, words: wordsFile, text: speech.text) { return audio }
-            let audio: NeuralAudio
+        try await audio(cacheKey: speech.cacheKey, text: speech.text) {
             do {
-                audio = try await fetch(speech, key: key)
+                return try await fetch(speech, key: key)
             } catch NeuralVoiceError.busy {
                 try await Task.sleep(for: .seconds(1.5))
-                audio = try await fetch(speech, key: key)
+                return try await fetch(speech, key: key)
             }
+        }
+    }
+
+    /// Фраза со своего сервера голоса: из кеша, а нет — с сервера.
+    public static func audio(text: String, voice: String, language: String?, server: LumenVoiceServer) async throws -> NeuralAudio {
+        try await audio(cacheKey: server.cacheKey(text: text, voice: voice, language: language), text: text) {
+            NeuralAudio(data: try await server.speech(text: text, voice: voice, language: language), words: nil)
+        }
+    }
+
+    /// Звук фразы из кеша или из `fetch`, одна загрузка на фразу. Сервер голоса может прислать
+    /// wav вместо mp3: файл получает своё расширение, иначе звук не прочитается для времени слов.
+    static func audio(cacheKey: String, text: String, fetch: @escaping @Sendable () async throws -> NeuralAudio) async throws -> NeuralAudio {
+        let wordsFile = directory.appending(path: cacheKey + ".words.json")
+        let files = ["mp3", "wav"].map { directory.appending(path: "\(cacheKey).\($0)") }
+        if let audio = files.lazy.compactMap({ cached($0, words: wordsFile, text: text) }).first { return audio }
+        return try await NeuralVoiceFetches.shared.audio(for: cacheKey) {
+            // Пока ждали очереди, фраза могла уже лечь в кеш.
+            if let audio = files.lazy.compactMap({ cached($0, words: wordsFile, text: text) }).first { return audio }
+            let audio = try await fetch()
+            let file = isWave(audio.data) ? files[1] : files[0]
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try? audio.data.write(to: file, options: .atomic)
             var result = audio
-            if result.words == nil { result.words = SpeechAlignment.words(in: speech.text, audio: file) }
+            if result.words == nil { result.words = SpeechAlignment.words(in: text, audio: file) }
             save(result.words, to: wordsFile)
             return result
         }
+    }
+
+    static func isWave(_ data: Data) -> Bool {
+        data.prefix(4) == Data("RIFF".utf8)
     }
 
     /// Сначала со временем слов; если модель так не умеет (ответ 400, 404, 422, нет звука

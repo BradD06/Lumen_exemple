@@ -36,14 +36,17 @@ final class ReadAloud {
         }
     }
 
-    /// Чей голос читает: Apple (бесплатно, без сети) или ElevenLabs по своему ключу.
+    /// Чей голос читает: Apple (бесплатно, без сети), «Голос Lumen» со своего компьютера
+    /// или ElevenLabs по своему ключу.
     enum VoiceEngine: String, CaseIterable {
         case apple
+        case lumen
         case elevenLabs
 
         var title: String {
             switch self {
             case .apple: "Apple"
+            case .lumen: "Lumen"
             case .elevenLabs: "ElevenLabs"
             }
         }
@@ -56,6 +59,8 @@ final class ReadAloud {
     static let elevenModelKey = "readAloud.elevenModel"
     static let elevenStabilityKey = "readAloud.elevenStability"
     static let elevenStyleKey = "readAloud.elevenStyle"
+    static let lumenVoiceKey = "readAloud.lumenVoice"
+    static let lumenVoiceNameKey = "readAloud.lumenVoiceName"
     static let voiceKey = "readAloud.voice"
     static let followKey = "readAloud.follow"
     static let highlightKey = "readAloud.highlight"
@@ -88,6 +93,7 @@ final class ReadAloud {
             UserDefaults.standard.set(rate, forKey: Self.rateKey)
             apple.rate = rate
             neural.rate = rate
+            lumen.rate = rate
             updateNowPlaying()
         }
     }
@@ -143,24 +149,64 @@ final class ReadAloud {
         )
     }
 
+    /// Свой сервер «Голос Lumen»: адрес в настройках, ключ в Связке ключей.
+    private(set) var lumenServer: LumenVoiceServer? = LumenVoiceStore.load()
+    /// Голос на сервере и его имя (чтобы показать его, не спрашивая сервер).
+    var lumenVoiceId: String = UserDefaults.standard.string(forKey: ReadAloud.lumenVoiceKey) ?? "a" {
+        didSet {
+            UserDefaults.standard.set(lumenVoiceId, forKey: Self.lumenVoiceKey)
+            lumen.voiceId = lumenVoiceId
+            fallbackToApple = false
+            refreshEngine()
+        }
+    }
+    var lumenVoiceName: String? = UserDefaults.standard.string(forKey: ReadAloud.lumenVoiceNameKey) {
+        didSet { UserDefaults.standard.set(lumenVoiceName, forKey: Self.lumenVoiceNameKey) }
+    }
+    /// Голоса сервера, загружаются по запросу.
+    private(set) var lumenVoices: [LumenVoiceInfo] = []
+
     /// Ключ ElevenLabs лежит в Связке ключей.
     private(set) var hasNeuralKey = false
     /// Голоса аккаунта ElevenLabs, загружаются по запросу.
     private(set) var neuralVoices: [NeuralVoiceInfo] = []
-    /// ElevenLabs не ответил: до следующего выбора голоса или книги читает Apple.
+    /// Нейроголос не ответил: до следующего выбора голоса или книги читает Apple.
     private(set) var fallbackToApple = false
 
-    /// Сейчас читает нейроголос.
-    var usesNeural: Bool {
-        engine == .elevenLabs && hasNeuralKey && elevenVoiceId != nil && !fallbackToApple
+    /// Голоса, из которых есть что выбрать: Apple всегда, остальные, когда настроены.
+    var availableEngines: [VoiceEngine] {
+        VoiceEngine.allCases.filter { engine in
+            switch engine {
+            case .apple: true
+            case .lumen: lumenServer != nil
+            case .elevenLabs: hasNeuralKey
+            }
+        }
     }
+
+    /// Кто читает на самом деле: выбранный голос, если он настроен и знает язык книги, иначе Apple.
+    var activeEngine: VoiceEngine {
+        guard !fallbackToApple else { return .apple }
+        switch engine {
+        case .apple: return .apple
+        case .lumen: return lumenServer != nil && LumenVoiceServer.supports(language) ? .lumen : .apple
+        case .elevenLabs: return hasNeuralKey && elevenVoiceId != nil ? .elevenLabs : .apple
+        }
+    }
+
+    /// Сейчас читает нейроголос (ElevenLabs или «Голос Lumen»).
+    var usesNeural: Bool { activeEngine != .apple }
 
     /// Пределы скорости у текущего голоса: нейроголос ускоряется только до 2×.
     var rates: ClosedRange<Double> { usesNeural ? NeuralVoicePlayer.rates : SpeechVoicePlayer.rates }
 
     /// Имя голоса для плеера.
     var voiceName: String {
-        if usesNeural { return elevenVoiceName ?? "ElevenLabs" }
+        switch activeEngine {
+        case .elevenLabs: return elevenVoiceName ?? "ElevenLabs"
+        case .lumen: return lumenVoiceName ?? "Голос Lumen"
+        case .apple: break
+        }
         return voiceId.flatMap { SpeechVoices.voice(id: $0)?.name }
             ?? language.flatMap { SpeechVoices.best(for: $0)?.name }
             ?? "Голос"
@@ -177,13 +223,19 @@ final class ReadAloud {
     @ObservationIgnored private var reader: ReaderModel?
     @ObservationIgnored private let apple = SpeechVoicePlayer()
     @ObservationIgnored private let neural = NeuralVoicePlayer()
+    @ObservationIgnored private let lumen = NeuralVoicePlayer()
     /// Какой голос сейчас ведёт главу; меняется в `refreshEngine`.
-    @ObservationIgnored private var playingNeural = false
+    @ObservationIgnored private var playing: VoiceEngine = .apple
     @ObservationIgnored private var neuralKey: String?
     @ObservationIgnored private let sample = NeuralVoiceSample()
+    /// Язык, о котором уже сказали, что «Голос Lumen» его не читает.
+    @ObservationIgnored private var noticedLanguage: String?
     private var player: any SpeechPlaying {
-        if playingNeural { return neural }
-        return apple
+        switch playing {
+        case .apple: apple
+        case .lumen: lumen
+        case .elevenLabs: neural
+        }
     }
     @ObservationIgnored private var sleepTask: Task<Void, Never>?
     @ObservationIgnored private var remoteCommandsInstalled = false
@@ -209,12 +261,16 @@ final class ReadAloud {
         neural.tuning = elevenTuning
         neural.apiKey = { [weak self] in self?.neuralKey }
         neural.onFailure = { [weak self] error in self?.neuralFailed(error) }
-        for voice in [apple, neural] as [any SpeechPlaying] {
+        lumen.rate = rate
+        lumen.voiceId = lumenVoiceId
+        lumen.lumenServer = { [weak self] in self?.lumenServer }
+        lumen.onFailure = { [weak self] error in self?.lumenFailed(error) }
+        for voice in [apple, neural, lumen] as [any SpeechPlaying] {
             voice.onPart = { [weak self] number in self?.didStart(number) }
             voice.onWord = { [weak self] number, range in self?.didSpeak(range, of: number) }
             voice.onFinish = { [weak self] in self?.chapterFinished() }
         }
-        playingNeural = usesNeural
+        playing = activeEngine
     }
 
     // MARK: Управление
@@ -379,6 +435,9 @@ final class ReadAloud {
         language = SpeechText.language(of: parts)
         apple.language = language
         neural.language = language
+        lumen.language = language
+        switchEngine()
+        noticeUnsupportedLanguage()
         chapterTitle = reader.currentChapterTitle
         guard !parts.isEmpty else {
             // Пустая глава (обложка, картинка): сразу следующая.
@@ -450,20 +509,103 @@ final class ReadAloud {
     /// Голос сменился (выбрали ElevenLabs, удалили ключ, сервис не ответил): глава звучит
     /// дальше с той же фразы новым голосом.
     private func refreshEngine() {
-        let wantsNeural = usesNeural
-        guard wantsNeural != playingNeural else { return }
-        let old = player
-        playingNeural = wantsNeural
-        old.stop()
-        if wantsNeural, rate > NeuralVoicePlayer.rates.upperBound { rate = NeuralVoicePlayer.rates.upperBound }
+        guard switchEngine() else { return }
         guard isActive, !parts.isEmpty, !isPaused, !isPreparing else { return }
         player.play(parts, from: index)
+    }
+
+    /// Ставит голос, который должен читать; `true`, если он сменился (старый остановлен).
+    @discardableResult
+    private func switchEngine() -> Bool {
+        let wanted = activeEngine
+        guard wanted != playing else { return false }
+        let old = player
+        playing = wanted
+        old.stop()
+        if wanted != .apple, rate > NeuralVoicePlayer.rates.upperBound { rate = NeuralVoicePlayer.rates.upperBound }
+        return true
+    }
+
+    /// Книга на языке, которого «Голос Lumen» не знает: читает Apple, и об этом говорится один раз.
+    private func noticeUnsupportedLanguage() {
+        guard engine == .lumen, lumenServer != nil, !LumenVoiceServer.supports(language), noticedLanguage != language else { return }
+        noticedLanguage = language
+        NoticeCenter.shared.show("Голос Lumen пока не читает на этом языке. Эту книгу читает голос Apple.")
     }
 
     private func neuralFailed(_ error: NeuralVoiceError) {
         NoticeCenter.shared.show("ElevenLabs: \(error.localizedDescription) Дальше читает голос Apple.")
         fallbackToApple = true
         refreshEngine()
+    }
+
+    private func lumenFailed(_ error: NeuralVoiceError) {
+        NoticeCenter.shared.show("Голос Lumen: \(error.localizedDescription) Дальше читает голос Apple.")
+        fallbackToApple = true
+        refreshEngine()
+    }
+
+    // MARK: Голос Lumen
+
+    /// Проверяет сервер и сохраняет его. Чужой ключ не сохраняется; если компьютер сейчас
+    /// не отвечает, адрес и ключ всё равно сохраняются: голос заработает, когда он включится.
+    /// `link` — адрес или ссылка с ключом из окна сервера, `key` — ключ, если его ввели отдельно.
+    @discardableResult
+    func saveLumenServer(link: String, key: String) async throws -> [LumenVoiceInfo]? {
+        guard let parsed = LumenVoiceServer.parse(link) else { throw NeuralVoiceError.badAddress }
+        let key = key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? parsed.key : key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let key, !key.isEmpty else { throw NeuralVoiceError.noKey }
+        let server = LumenVoiceServer(url: parsed.url, key: key)
+        var voices: [LumenVoiceInfo]?
+        do {
+            voices = try await server.voices()
+        } catch NeuralVoiceError.serverUnreachable {
+            voices = nil
+        } catch NeuralVoiceError.offline {
+            voices = nil
+        }
+        try LumenVoiceStore.save(server)
+        lumenServer = server
+        lumenVoices = voices ?? []
+        if let voices { pickLumenVoice(from: voices) }
+        fallbackToApple = false
+        refreshEngine()
+        return voices
+    }
+
+    func deleteLumenServer() {
+        LumenVoiceStore.delete()
+        lumenServer = nil
+        lumenVoices = []
+        if engine == .lumen { engine = .apple } else { refreshEngine() }
+    }
+
+    /// Голоса сервера. Если выбранного там нет, берётся первый.
+    func loadLumenVoices() async throws {
+        guard let lumenServer else { throw NeuralVoiceError.noKey }
+        let voices = try await lumenServer.voices()
+        lumenVoices = voices
+        pickLumenVoice(from: voices)
+    }
+
+    func chooseLumenVoice(_ voice: LumenVoiceInfo) {
+        lumenVoiceName = voice.name
+        lumenVoiceId = voice.id
+    }
+
+    private func pickLumenVoice(from voices: [LumenVoiceInfo]) {
+        if let current = voices.first(where: { $0.id == lumenVoiceId }) {
+            lumenVoiceName = current.name
+        } else if let first = voices.first {
+            chooseLumenVoice(first)
+        }
+    }
+
+    /// «Послушать» выбранный голос Lumen.
+    func playLumenSample() async throws {
+        guard let lumenServer else { throw NeuralVoiceError.noKey }
+        if isPlaying { pause() }
+        try await sample.play(voice: lumenVoiceId, server: lumenServer)
     }
 
     /// Проверяет ключ у ElevenLabs и сохраняет его. Неверный ключ не сохраняется;

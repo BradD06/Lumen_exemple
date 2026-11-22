@@ -35,6 +35,9 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     }
     /// Ключ берётся при каждой загрузке: его могли сменить в настройках.
     public var apiKey: () -> String? = { nil }
+    /// Свой сервер «Голос Lumen» вместо ElevenLabs (`voiceId` тогда голос сервера).
+    /// Адрес и ключ тоже берутся при каждой загрузке.
+    public var lumenServer: (() -> LumenVoiceServer?)?
 
     /// `AVAudioPlayer` ускоряет без смены тона только до 2×.
     public nonisolated static let rates: ClosedRange<Double> = 0.5...2
@@ -187,18 +190,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
 
     private func load(_ number: Int) async throws -> NeuralAudio {
         if let task = loads[number] { return try await task.value }
-        guard let key = apiKey(), !key.isEmpty else { throw NeuralVoiceError.noKey }
-        guard let voiceId else { throw NeuralVoiceError.noVoice }
-        let speech = NeuralSpeechRequest(
-            text: parts[number].spoken,
-            voiceId: voiceId,
-            model: model,
-            tuning: tuning,
-            language: language,
-            previous: number > 0 ? parts[number - 1].spoken : nil,
-            next: number + 1 < parts.count ? parts[number + 1].spoken : nil
-        )
-        let task = Task { try await NeuralVoiceCache.audio(for: speech, key: key) }
+        let task = try makeLoad(number)
         loads[number] = task
         do {
             return try await task.value
@@ -206,6 +198,27 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
             if loads[number] == task { loads[number] = nil }
             throw error
         }
+    }
+
+    private func makeLoad(_ number: Int) throws -> Task<NeuralAudio, any Error> {
+        guard let voiceId else { throw NeuralVoiceError.noVoice }
+        let text = parts[number].spoken
+        if let lumenServer {
+            guard let server = lumenServer() else { throw NeuralVoiceError.noKey }
+            let language = language
+            return Task { try await NeuralVoiceCache.audio(text: text, voice: voiceId, language: language, server: server) }
+        }
+        guard let key = apiKey(), !key.isEmpty else { throw NeuralVoiceError.noKey }
+        let speech = NeuralSpeechRequest(
+            text: text,
+            voiceId: voiceId,
+            model: model,
+            tuning: tuning,
+            language: language,
+            previous: number > 0 ? parts[number - 1].spoken : nil,
+            next: number + 1 < parts.count ? parts[number + 1].spoken : nil
+        )
+        return Task { try await NeuralVoiceCache.audio(for: speech, key: key) }
     }
 
     /// Следующие фразы скачиваются по одной, пока звучит эта; дальние загрузки отменяются.
@@ -274,6 +287,16 @@ public final class NeuralVoiceSample {
     public func play(voiceId: String, model: NeuralVoiceModel, tuning: NeuralVoiceTuning, key: String) async throws {
         let speech = NeuralSpeechRequest(text: Self.text, voiceId: voiceId, model: model, tuning: tuning, language: "ru")
         let sound = try await NeuralVoiceCache.audio(for: speech, key: key)
+        try play(sound)
+    }
+
+    /// Та же фраза голосом своего сервера.
+    public func play(voice: String, server: LumenVoiceServer) async throws {
+        let sound = try await NeuralVoiceCache.audio(text: Self.text, voice: voice, language: "ru", server: server)
+        try play(sound)
+    }
+
+    private func play(_ sound: NeuralAudio) throws {
         player?.stop()
         SpeechAudio.activate()
         player = try AVAudioPlayer(data: sound.data)
