@@ -146,6 +146,14 @@ public enum NeuralVoiceError: Error, Equatable, LocalizedError {
         }
     }
 
+    /// Сбой, который проходит сам: сеть моргнула, компьютер или сервис заняты, модель перезапускается.
+    public var isTemporary: Bool {
+        switch self {
+        case .offline, .serverUnreachable, .voiceStarting, .busy: true
+        default: false
+        }
+    }
+
     static func wrap(_ error: any Error) -> NeuralVoiceError {
         if let error = error as? NeuralVoiceError { return error }
         if error is URLError { return .offline }
