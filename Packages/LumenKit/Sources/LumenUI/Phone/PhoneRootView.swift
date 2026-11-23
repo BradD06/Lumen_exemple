@@ -105,9 +105,9 @@ struct PhoneRootView: View {
         .overlay(alignment: .bottom) {
             if showsTabCapsule {
                 VStack(spacing: 0) {
-                    // Книга звучит: мини-плеер над капсулой разделов.
-                    if ReadAloud.shared.isActive {
-                        PhoneMiniPlayer()
+                    // Книга звучит: плеер над капсулой разделов, нажатие открывает книгу.
+                    if let sourceId = ReadAloud.shared.sourceId {
+                        PhoneMiniPlayer { push(.source(sourceId, highlight: nil)) }
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                     PhoneTabCapsule(

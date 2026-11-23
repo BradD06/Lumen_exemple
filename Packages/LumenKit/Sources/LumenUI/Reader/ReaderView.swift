@@ -369,10 +369,10 @@ struct ReaderView: View {
             Button {
                 listen()
             } label: {
-                Label(isListening ? "Пауза чтения вслух" : "Слушать", systemImage: isListening ? "headphones.circle.fill" : "headphones")
+                Label(isListening ? "Выключить чтение вслух" : "Слушать", systemImage: isListening ? "headphones.circle.fill" : "headphones")
             }
             .keyboardShortcut("s", modifiers: [.command, .option])
-            .help(isListening ? "Пауза или продолжить чтение вслух (⌥⌘S)" : "Слушать книгу с этого места (⌥⌘S)")
+            .help(isListening ? "Выключить чтение вслух (⌥⌘S)" : "Слушать книгу с этого места (⌥⌘S)")
             .disabled(!model.canReadAloud)
             .accessibilityIdentifier("reader.listen")
             Button {
@@ -391,14 +391,14 @@ struct ReaderView: View {
     /// Эта книга сейчас звучит.
     var isListening: Bool { ReadAloud.shared.sourceId == model.sourceId }
 
-    /// «Слушать»: эта книга уже звучит — пауза или продолжить, иначе читать с места на экране.
+    /// «Слушать» включает режим аудио в самой читалке (плеер вместо нижней панели или острова),
+    /// второе нажатие выключает его. Пауза в плеере.
     func listen() {
         let readAloud = ReadAloud.shared
+        LumenSounds.play(.toggle)
         if isListening {
-            readAloud.showsRooms = false
-            readAloud.togglePause()
+            withAnimation(LumenMotion.standard) { readAloud.stop() }
         } else {
-            LumenSounds.play(.toggle)
             Task { await readAloud.start(model) }
         }
     }
