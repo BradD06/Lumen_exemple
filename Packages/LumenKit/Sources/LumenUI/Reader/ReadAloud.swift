@@ -181,8 +181,18 @@ final class ReadAloud {
     private(set) var hasNeuralKey = false
     /// Голоса аккаунта ElevenLabs, загружаются по запросу.
     private(set) var neuralVoices: [NeuralVoiceInfo] = []
-    /// Нейроголос не ответил: до следующего выбора голоса или книги читает Apple.
-    private(set) var fallbackToApple = false
+    /// Нейроголос не ответил: до следующего выбора голоса или книги читает Apple. После сбоя связи
+    /// «Голос Lumen» возвращается сам, когда компьютер снова ответит (`watchLumenServer`).
+    private(set) var fallbackToApple = false {
+        didSet {
+            guard !fallbackToApple else { return }
+            recoveryTask?.cancel()
+            recoveryTask = nil
+            returnsToLumen = false
+        }
+    }
+    /// Как часто спрашивать компьютер, пока вместо «Голоса Lumen» читает Apple.
+    static let recoveryInterval: Double = 30
 
     /// Голоса, из которых есть что выбрать: Apple всегда, остальные, когда настроены.
     var availableEngines: [VoiceEngine] {
@@ -249,6 +259,10 @@ final class ReadAloud {
         }
     }
     @ObservationIgnored private var sleepTask: Task<Void, Never>?
+    /// Ждёт, когда компьютер с «Голосом Lumen» снова ответит.
+    @ObservationIgnored private var recoveryTask: Task<Void, Never>?
+    /// Компьютер ответил: со следующей фразы Apple снова читает «Голос Lumen».
+    @ObservationIgnored private var returnsToLumen = false
     @ObservationIgnored private var remoteCommandsInstalled = false
     @ObservationIgnored private var artwork: MPMediaItemArtwork?
     /// Голос ждёт, пока PDF перейдёт в «Текст», и начнёт с места на экране, а не с начала главы.
@@ -274,6 +288,7 @@ final class ReadAloud {
         neural.tuning = elevenTuning
         neural.apiKey = { [weak self] in self?.neuralKey }
         neural.onFailure = { [weak self] error in self?.neuralFailed(error) }
+        neural.onWaiting = { [weak self] error in self?.neuralWaiting(error) }
         lumen.rate = rate
         lumen.voiceId = lumenVoiceId
         lumen.lumenServer = { [weak self] in self?.lumenServer }
@@ -281,6 +296,7 @@ final class ReadAloud {
         lumen.lookahead = 3
         lumen.parallelLoads = true
         lumen.onFailure = { [weak self] error in self?.lumenFailed(error) }
+        lumen.onWaiting = { [weak self] error in self?.lumenWaiting(error) }
         for voice in [apple, neural, lumen] as [any SpeechPlaying] {
             voice.onPart = { [weak self] number in self?.didStart(number) }
             voice.onWord = { [weak self] number, range in self?.didSpeak(range, of: number) }
@@ -359,6 +375,9 @@ final class ReadAloud {
 
     func stop() {
         player.stop()
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        returnsToLumen = false
         reader?.web.clearSpoken()
         reader?.onChapterReady = nil
         reader = nil
@@ -490,6 +509,10 @@ final class ReadAloud {
         mark(part, follow: UserDefaults.standard.object(forKey: Self.followKey) as? Bool ?? true)
         if let reader, reader.section == chapterSection { reader.listened(to: part) }
         updateNowPlaying()
+        // Компьютер снова на связи: голос меняется на границе фраз, а не посреди слова.
+        if returnsToLumen, playing == .apple {
+            Task { @MainActor [weak self] in self?.backToLumen() }
+        }
     }
 
     /// Слова звучащей фразы и их места в главе: считаются раз на фразу.
@@ -597,6 +620,16 @@ final class ReadAloud {
         NoticeCenter.shared.show("Голос Lumen пока не читает на этом языке. Эту книгу читает голос Apple.")
     }
 
+    private func neuralWaiting(_ error: NeuralVoiceError) {
+        let reason = error == .busy ? "сервис перегружен" : "нет связи"
+        NoticeCenter.shared.show("ElevenLabs: \(reason). Жду до минуты, потом почитает голос Apple.")
+    }
+
+    private func lumenWaiting(_ error: NeuralVoiceError) {
+        let reason = error == .voiceStarting ? "голос на компьютере перезапускается" : "нет связи с компьютером"
+        NoticeCenter.shared.show("Голос Lumen: \(reason). Жду до минуты, потом почитает голос Apple.")
+    }
+
     private func neuralFailed(_ error: NeuralVoiceError) {
         NoticeCenter.shared.show("ElevenLabs: \(error.localizedDescription) Дальше читает голос Apple.")
         fallbackToApple = true
@@ -604,8 +637,36 @@ final class ReadAloud {
     }
 
     private func lumenFailed(_ error: NeuralVoiceError) {
-        NoticeCenter.shared.show("Голос Lumen: \(error.localizedDescription) Дальше читает голос Apple.")
+        let back = error.isTemporary ? " Когда компьютер ответит, снова зазвучит «Голос Lumen»." : ""
+        NoticeCenter.shared.show("Голос Lumen: \(error.localizedDescription) Пока читает голос Apple.\(back)")
         fallbackToApple = true
+        refreshEngine()
+        if error.isTemporary { watchLumenServer() }
+    }
+
+    /// После сбоя связи раз в полминуты спрашивает компьютер. Ответил — со следующей фразы
+    /// снова читает «Голос Lumen» (на паузе — сразу).
+    private func watchLumenServer() {
+        recoveryTask?.cancel()
+        recoveryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.recoveryInterval))
+                guard let self, !Task.isCancelled, self.fallbackToApple, self.engine == .lumen, self.isActive,
+                      let server = self.lumenServer else { return }
+                guard (try? await server.voices()) != nil else { continue }
+                guard !Task.isCancelled, self.fallbackToApple, self.isActive else { return }
+                self.returnsToLumen = true
+                if self.isPaused { self.backToLumen() }
+                return
+            }
+        }
+    }
+
+    private func backToLumen() {
+        returnsToLumen = false
+        guard fallbackToApple, engine == .lumen else { return }
+        fallbackToApple = false
+        NoticeCenter.shared.show("Голос Lumen снова на связи.")
         refreshEngine()
     }
 

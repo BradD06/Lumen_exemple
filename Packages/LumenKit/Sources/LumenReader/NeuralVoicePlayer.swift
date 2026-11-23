@@ -6,13 +6,17 @@ import Foundation
 /// Пока звучит фраза, следующие две скачиваются по очереди (бесплатный тариф не любит много
 /// запросов сразу), поэтому между фразами нет пауз. Свой сервер «Голос Lumen» готовит несколько
 /// частей сразу быстрее, чем по одной: ему `parallelLoads` и `lookahead` побольше.
-/// Не получилось (нет сети, ключ, кончились знаки) — `onFailure`, и читалка переходит на голос Apple.
+/// Временный сбой (сеть моргнула, компьютер занят) — `onWaiting`, голос ждёт и пробует снова
+/// около минуты. Не получилось и так, или сбой не временный (ключ, кончились знаки) — `onFailure`,
+/// и читалка переходит на голос Apple.
 @MainActor
 public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     public var onPart: ((Int) -> Void)?
     public var onWord: ((Int, NSRange) -> Void)?
     public var onFinish: (() -> Void)?
     public var onFailure: ((NeuralVoiceError) -> Void)?
+    /// Связь пропала или компьютер занят: голос ждёт и пробует снова, а не сразу уходит на Apple.
+    public var onWaiting: ((NeuralVoiceError) -> Void)?
 
     public private(set) var parts: [SpeechPart] = []
     public private(set) var index = 0
@@ -42,6 +46,11 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     /// Сколько следующих частей готовить, пока звучит эта, и все ли сразу, а не по одной.
     public var lookahead = 2
     public var parallelLoads = false
+    /// Через сколько секунд пробовать снова при временном сбое, всего около минуты; потом `onFailure`.
+    /// На паузе попытки не считаются: голос спрашивает реже и ждёт сколько угодно.
+    var retryDelays: [Double] = [1, 2, 4, 8, 15, 30]
+    /// Для тестов: озвучка текста части без сети и кеша.
+    var fetch: (@Sendable (String) async throws -> NeuralAudio)?
 
     /// `AVAudioPlayer` ускоряет без смены тона только до 2×.
     public nonisolated static let rates: ClosedRange<Double> = 0.5...2
@@ -56,6 +65,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     /// Следит за временем звучащей фразы и сообщает, какое слово звучит.
     private var wordTask: Task<Void, Never>?
     private let delegate = Delegate()
+    private let silence = SilentAudio()
 
     public override init() {
         super.init()
@@ -86,6 +96,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         guard isPlaying, !isPaused else { return }
         isPaused = true
         audio?.pause()
+        silence.stop()
     }
 
     public func resume() {
@@ -131,6 +142,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         audio?.stop()
         audio = nil
         audioIndex = nil
+        silence.stop()
         if !keepLoads {
             loads.values.forEach { $0.cancel() }
             loads = [:]
@@ -150,9 +162,12 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         startTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard let self, self.generation == current else { return }
+            // Пока часть озвучивается, звучит тишина: в фоне iOS не усыпит приложение посреди запроса.
+            if !self.isPaused { self.silence.start() }
             do {
-                let sound = try await self.load(number)
+                let sound = try await self.loadWaiting(number, generation: current)
                 guard self.generation == current, self.isPlaying else { return }
+                self.silence.stop()
                 let player = try AVAudioPlayer(data: sound.data)
                 player.enableRate = true
                 player.rate = Float(Self.playbackRate(self.rate))
@@ -199,6 +214,24 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         return NeuralVoiceCache.has(text: parts[number].spoken, voice: voiceId, language: language, server: server)
     }
 
+    /// Загрузка части. Временный сбой (сеть моргнула, компьютер занят, модель перезапускается):
+    /// ждём и пробуем снова, пока эта часть всё ещё нужна.
+    private func loadWaiting(_ number: Int, generation current: Int) async throws -> NeuralAudio {
+        var attempt = 0
+        while true {
+            do {
+                return try await load(number)
+            } catch {
+                guard !(error is CancellationError), !Task.isCancelled, generation == current,
+                      NeuralVoiceError.wrap(error).isTemporary, attempt < retryDelays.count else { throw error }
+                if attempt == 0 { onWaiting?(NeuralVoiceError.wrap(error)) }
+                try await Task.sleep(for: .seconds(retryDelays[isPaused ? retryDelays.count - 1 : attempt]))
+                guard generation == current, isPlaying else { throw CancellationError() }
+                if !isPaused { attempt += 1 }
+            }
+        }
+    }
+
     private func load(_ number: Int) async throws -> NeuralAudio {
         if let task = loads[number] {
             let text = parts[number].spoken
@@ -225,6 +258,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     private func makeLoad(_ number: Int) throws -> Task<NeuralAudio, any Error> {
         guard let voiceId else { throw NeuralVoiceError.noVoice }
         let text = parts[number].spoken
+        if let fetch { return Task { try await fetch(text) } }
         if let lumenServer {
             guard let server = lumenServer() else { throw NeuralVoiceError.noKey }
             let language = language
@@ -303,6 +337,43 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
             Task { @MainActor in self.player?.finished(id) }
         }
     }
+}
+
+/// Тишина, пока следующая часть ещё озвучивается. В фоне iOS держит приложение, только пока
+/// оно что-то играет: без звука на заблокированном экране Lumen усыпили бы посреди запроса
+/// к компьютеру, голос замолк бы, а потом перешёл на Apple.
+@MainActor
+final class SilentAudio {
+    private var player: AVAudioPlayer?
+
+    func start() {
+        #if os(iOS)
+        if player == nil {
+            player = try? AVAudioPlayer(data: Self.wav)
+            player?.numberOfLoops = -1
+        }
+        if player?.isPlaying == false { player?.play() }
+        #endif
+    }
+
+    func stop() {
+        player?.pause()
+    }
+
+    /// Секунда тишины в WAV: 8 кГц, 16 бит, моно.
+    nonisolated static let wav: Data = {
+        let rate: UInt32 = 8000
+        let bytes = rate * 2
+        var data = Data()
+        func text(_ value: String) { data.append(contentsOf: Array(value.utf8)) }
+        func u32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        func u16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        text("RIFF"); u32(36 + bytes); text("WAVE")
+        text("fmt "); u32(16); u16(1); u16(1); u32(rate); u32(rate * 2); u16(2); u16(16)
+        text("data"); u32(bytes)
+        data.append(Data(count: Int(bytes)))
+        return data
+    }()
 }
 
 /// «Послушать» в настройках: одна фраза выбранным голосом.
