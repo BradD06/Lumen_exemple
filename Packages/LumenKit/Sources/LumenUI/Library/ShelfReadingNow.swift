@@ -14,6 +14,8 @@ struct ShelfReadingNow: View {
     @State private var snapshot = ShelfReadingSnapshot.empty
     /// Широкое окно: выдержка и заметки справа от книги, а не под ней.
     @State private var isWide = true
+    /// Узкое окно (iPhone): рядом с обложкой только название, цифры и кнопки идут под ней во всю ширину.
+    @State private var isCompact = false
     @Environment(\.appActions) private var appActions
     @Environment(\.lumenTheme) private var theme
 
@@ -30,6 +32,7 @@ struct ShelfReadingNow: View {
             }
         }
         .onGeometryChange(for: Bool.self) { $0.size.width >= 820 } action: { isWide = $0 }
+        .onGeometryChange(for: Bool.self) { $0.size.width < 560 } action: { isCompact = $0 }
         .task { await observe() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Читаю сейчас")
@@ -44,9 +47,13 @@ struct ShelfReadingNow: View {
             ? AnyLayout(HStackLayout(alignment: .top, spacing: 26))
             : AnyLayout(VStackLayout(alignment: .leading, spacing: 18))
         return layout {
-            HStack(alignment: .top, spacing: isWide ? 26 : 16) {
-                cover(book)
-                details(book)
+            if isCompact {
+                compactDetails(book)
+            } else {
+                HStack(alignment: .top, spacing: isWide ? 26 : 16) {
+                    cover(book)
+                    details(book)
+                }
             }
             if isWide {
                 Rectangle()
@@ -76,7 +83,12 @@ struct ShelfReadingNow: View {
         Button {
             onOpenSource(book.id)
         } label: {
-            SourceCoverArt(source: book, attachments: database.attachments, width: isWide ? 130 : 96, height: isWide ? 190 : 140)
+            SourceCoverArt(
+                source: book,
+                attachments: database.attachments,
+                width: isWide ? 130 : isCompact ? 84 : 96,
+                height: isWide ? 190 : isCompact ? 122 : 140
+            )
                 .shadow(color: .black.opacity(theme.shadowOpacity * 1.2), radius: 16, y: 10)
         }
         .buttonStyle(.plain)
@@ -123,55 +135,109 @@ struct ShelfReadingNow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// iPhone: обложка и название рядом, а цифры, полоса и кнопки под ними во всю ширину карточки,
+    /// иначе в узкой колонке справа от обложки всё обрезается, а кнопки сжимаются в высокие пилюли.
+    private func compactDetails(_ book: Source) -> some View {
+        let forecast = ReadingForecast(progress: book.progress, sessions: snapshot.sessions)
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                cover(book)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(place)
+                        .font(.caption2.weight(.semibold))
+                        .textCase(.uppercase)
+                        .tracking(0.8)
+                        .foregroundStyle(theme.accent)
+                        .lineLimit(2)
+                    Text(book.displayTitle)
+                        .font(.system(size: 20, weight: .semibold))
+                        .tracking(-0.3)
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let author = book.author, !author.isEmpty {
+                        Text(author)
+                            .font(.subheadline)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(2)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            HStack(alignment: .top, spacing: 12) {
+                stat(ReadingText.percent(book.progress), "прочитано", fill: true)
+                if let remaining = forecast.remainingSeconds, remaining > 0 {
+                    stat(SourceDashboardView.remainingValue(forecast), "осталось", fill: true)
+                }
+                if let date = forecast.finishDate, forecast.remainingSeconds != 0 {
+                    stat(ReadingText.day(date), "дочитаю", fill: true)
+                }
+            }
+            ReadingProgressBar(progress: book.progress)
+            HStack(spacing: 10) { buttons(book, fill: true) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     /// «Читаю · полка «Классика»».
     private var place: String {
         guard let shelf = snapshot.shelfName else { return "Читаю сейчас" }
         return "Читаю · полка «\(shelf)»"
     }
 
-    private func stat(_ value: String, _ caption: String) -> some View {
+    /// `fill`: цифры делят ширину поровну и, если не влезают, чуть уменьшаются, а не обрезаются.
+    private func stat(_ value: String, _ caption: String, fill: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(value)
                 .font(.system(.title3, design: .rounded).weight(.semibold))
                 .monospacedDigit()
                 .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(fill ? 0.7 : 1)
             Text(caption)
                 .font(.caption)
                 .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
         }
+        .frame(maxWidth: fill ? .infinity : nil, alignment: .leading)
     }
 
+    /// `fill`: две кнопки поровну на всю ширину (iPhone), иначе по размеру надписи.
     @ViewBuilder
-    private func buttons(_ book: Source) -> some View {
+    private func buttons(_ book: Source, fill: Bool = false) -> some View {
         Button {
             onOpenSource(book.id)
         } label: {
             Label("Продолжить", systemImage: "book")
+                .labelStyle(.titleAndIcon)
                 .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
                 .foregroundStyle(theme.onAccent)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 36)
+                .padding(.horizontal, fill ? 10 : 16)
+                .frame(maxWidth: fill ? .infinity : nil, minHeight: fill ? 44 : 36)
                 .background(theme.accent, in: Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .fixedSize()
+        .fixedSize(horizontal: !fill, vertical: true)
         .keyHint("Продолжить чтение") { onOpenSource(book.id) }
         .accessibilityIdentifier("shelf-continue")
 
         Button {
             openWithNotes(book)
         } label: {
-            Label("С заметками рядом", systemImage: "rectangle.split.2x1")
+            Label(fill ? "С заметками" : "С заметками рядом", systemImage: "rectangle.split.2x1")
+                .labelStyle(.titleAndIcon)
                 .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
                 .foregroundStyle(theme.textPrimary)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 36)
+                .padding(.horizontal, fill ? 10 : 16)
+                .frame(maxWidth: fill ? .infinity : nil, minHeight: fill ? 44 : 36)
                 .lumenGlass(Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .fixedSize()
+        .fixedSize(horizontal: !fill, vertical: true)
         .help("Открыть книгу, а рядом заметки к ней")
         .keyHint("С заметками рядом") { openWithNotes(book) }
     }
