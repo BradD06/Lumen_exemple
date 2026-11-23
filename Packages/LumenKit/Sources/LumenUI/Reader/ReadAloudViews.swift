@@ -4,7 +4,7 @@ import LumenThemes
 import SwiftUI
 
 // Плеер чтения вслух в «Острове»: на Mac и iPad остров в читалке становится плеером,
-// на других экранах у острова кружок с обложкой; на iPhone мини-плеер внизу и полный плеер шторкой.
+// на других экранах у острова кружок с обложкой; на iPhone плеер внизу, в читалке вместо её нижней панели.
 
 /// Обложка звучащей книги: своё фото или нарисованная обложка её цветами.
 struct ReadAloudCover: View {
@@ -171,7 +171,7 @@ struct ReadAloudBar: View {
                 .background(theme.ink, in: Circle())
                 .contentTransition(.symbolEffect(.replace))
         }
-        .help(readAloud.isPaused ? "Продолжить (⌥⌘S)" : "Пауза (⌥⌘S)")
+        .help(readAloud.isPaused ? "Продолжить" : "Пауза")
         .accessibilityLabel(readAloud.isPaused ? "Продолжить" : "Пауза")
         .keyHint(readAloud.isPaused ? "Продолжить" : "Пауза") { readAloud.togglePause() }
     }
@@ -530,39 +530,53 @@ struct ReadAloudSettingsSection: View {
     }
 }
 
-/// iPhone: мини-плеер внизу экрана, пока книга звучит. Нажатие открывает полный плеер.
+/// iPhone: плеер внизу, пока книга звучит. В читалке это и есть режим аудио: та же книга
+/// с подсвеченной фразой, а вместо нижней панели плеер; нажатие на название открывает голос,
+/// скорость и таймер прямо над ним. Второго экрана с текстом нет: в читалке текст уже перед глазами.
+/// На других экранах плеер с обложкой, и нажатие открывает звучащую книгу (`onOpen`).
 struct PhoneMiniPlayer: View {
+    /// Открыть звучащую книгу. `nil` в самой читалке.
+    var onOpen: (() -> Void)?
+
     @Environment(\.lumenTheme) private var theme
-    @State private var isFullPresented = false
+    @State private var isPanelPresented = false
     private var readAloud: ReadAloud { .shared }
 
     static let height: CGFloat = 62
 
+    private var isInReader: Bool { onOpen == nil }
+
     var body: some View {
         HStack(spacing: 10) {
-            ReadAloudCover(width: 30, height: 42, radius: 3)
+            // В читалке книга и так на экране, обложка только заняла бы место.
+            if !isInReader {
+                ReadAloudCover(width: 30, height: 42, radius: 3)
+            }
             VStack(alignment: .leading, spacing: 2) {
-                Text(readAloud.chapterTitle.isEmpty ? readAloud.bookTitle : readAloud.chapterTitle)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                Text("\(readAloud.voiceName) · ещё \(ReadAloudFormat.minutes(readAloud.remaining))")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(theme.textTertiary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(readAloud.chapterTitle.isEmpty ? readAloud.bookTitle : readAloud.chapterTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                    if isInReader {
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
+                HStack(spacing: 4) {
+                    if readAloud.sleepTimer != .off {
+                        Image(systemName: "moon.fill").font(.system(size: 9))
+                    }
+                    Text(status).lineLimit(1)
+                }
+                .font(.system(size: 11.5))
+                .foregroundStyle(theme.textTertiary)
                 ReadAloudProgress(fraction: readAloud.chapterFraction)
                     .padding(.top, 3)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                readAloud.previous()
-            } label: {
-                Image(systemName: "backward.end.fill")
-                    .font(.system(size: 17))
-                    .foregroundStyle(theme.textSecondary)
-                    .frame(width: 36, height: 44)
-            }
-            .accessibilityLabel("Фраза назад")
+            iconButton("backward.end.fill", "Фраза назад") { readAloud.previous() }
             Button {
                 readAloud.togglePause()
             } label: {
@@ -574,174 +588,56 @@ struct PhoneMiniPlayer: View {
                     .contentTransition(.symbolEffect(.replace))
             }
             .accessibilityLabel(readAloud.isPaused ? "Продолжить" : "Пауза")
-            Button {
-                Task { await readAloud.excerptCurrent() }
-            } label: {
-                Image(systemName: "quote.opening")
-                    .font(.system(size: 17))
-                    .foregroundStyle(theme.textSecondary)
-                    .frame(width: 36, height: 44)
+            if isInReader {
+                iconButton("forward.end.fill", "Фраза вперёд") { readAloud.next() }
             }
-            .accessibilityLabel("Фразу в заметки")
+            iconButton("quote.opening", "Фразу в заметки") {
+                Task { await readAloud.excerptCurrent() }
+            }
         }
         .buttonStyle(.plain)
-        .padding(.leading, 10)
+        .padding(.leading, isInReader ? 16 : 10)
         .padding(.trailing, 8)
         .frame(height: Self.height)
         .lumenGlass(Capsule())
         .contentShape(Capsule())
-        .onTapGesture { isFullPresented = true }
+        .onTapGesture {
+            if let onOpen {
+                onOpen()
+            } else {
+                isPanelPresented = true
+            }
+        }
+        .popover(isPresented: $isPanelPresented, arrowEdge: .bottom) {
+            ReadAloudPanel()
+                .presentationCompactAdaptation(.popover)
+                .keyHintHost()
+        }
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
-        .sheet(isPresented: $isFullPresented) {
-            PhoneFullPlayer()
-                .presentationDetents([.large])
-                .presentationCornerRadius(34)
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: isInReader ? "Голос, скорость и таймер" : "Открыть книгу") {
+            if let onOpen { onOpen() } else { isPanelPresented = true }
         }
         .accessibilityIdentifier("readAloud.mini")
     }
-}
 
-/// iPhone: полный плеер. Обложка маленькая, а большую часть экрана занимает текст главы
-/// вокруг звучащей фразы.
-struct PhoneFullPlayer: View {
-    @Environment(\.lumenTheme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    @State private var isPanelPresented = false
-    private var readAloud: ReadAloud { .shared }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button { dismiss() } label: {
-                    Image(systemName: "chevron.down").font(.system(size: 18, weight: .semibold))
-                }
-                .accessibilityLabel("Свернуть")
-                Spacer()
-            }
-            .foregroundStyle(theme.textSecondary)
-            .padding(.bottom, 10)
-
-            HStack(spacing: 12) {
-                ReadAloudCover(width: 44, height: 62, radius: 5)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(readAloud.bookTitle).font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.textPrimary)
-                    Text(readAloud.chapterTitle).font(.system(size: 12.5)).foregroundStyle(theme.textTertiary).lineLimit(1)
-                }
-                Spacer()
-            }
-            .padding(.bottom, 14)
-
-            chapterText
-
-            ReadAloudProgress(fraction: readAloud.chapterFraction)
-                .padding(.top, 16)
-            HStack {
-                Text(ReadAloudFormat.clock(readAloud.elapsed))
-                Spacer()
-                Text("−" + ReadAloudFormat.clock(readAloud.remaining))
-            }
-            .font(.system(size: 11.5))
-            .monospacedDigit()
-            .foregroundStyle(theme.textTertiary)
-            .padding(.top, 6)
-
-            HStack {
-                Button(ReadAloudFormat.rate(readAloud.rate)) { isPanelPresented = true }
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(theme.textSecondary)
-                Spacer()
-                Button { readAloud.previous() } label: { Image(systemName: "backward.end.fill") }
-                    .accessibilityLabel("Фраза назад")
-                Spacer()
-                Button { readAloud.togglePause() } label: {
-                    Image(systemName: readAloud.isPaused ? "play.fill" : "pause.fill")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(theme.onInk)
-                        .frame(width: 60, height: 60)
-                        .background(theme.ink, in: Circle())
-                        .contentTransition(.symbolEffect(.replace))
-                }
-                .accessibilityLabel(readAloud.isPaused ? "Продолжить" : "Пауза")
-                Spacer()
-                Button { readAloud.next() } label: { Image(systemName: "forward.end.fill") }
-                    .accessibilityLabel("Фраза вперёд")
-                Spacer()
-                Button { isPanelPresented = true } label: {
-                    Image(systemName: readAloud.sleepTimer == .off ? "moon" : "moon.fill")
-                }
-                .accessibilityLabel("Таймер сна")
-            }
-            .font(.system(size: 24))
-            .foregroundStyle(theme.textPrimary)
-            .padding(.vertical, 12)
-
-            HStack(spacing: 8) {
-                Button { isPanelPresented = true } label: {
-                    Label("Голос и скорость", systemImage: "waveform")
-                        .frame(maxWidth: .infinity)
-                }
-                Button { Task { await readAloud.excerptCurrent() } } label: {
-                    Label("Фразу в заметки", systemImage: "quote.opening")
-                        .frame(maxWidth: .infinity)
-                }
-            }
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(theme.textSecondary)
-            .labelStyle(.titleAndIcon)
-            .buttonStyle(ReadAloudChipStyle())
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 20)
-        .padding(.top, 18)
-        .padding(.bottom, 10)
-        .background(theme.background.ignoresSafeArea())
-        .sheet(isPresented: $isPanelPresented) {
-            ReadAloudPanel()
-                .presentationDetents([.medium, .large])
-                .presentationCornerRadius(34)
-        }
+    private var status: String {
+        if readAloud.isPreparing { return "Готовлю главу…" }
+        var parts = [readAloud.voiceName]
+        if abs(readAloud.rate - 1) > 0.01 { parts.append(ReadAloudFormat.rate(readAloud.rate)) }
+        parts.append("ещё \(ReadAloudFormat.minutes(readAloud.remaining))")
+        return parts.joined(separator: " · ")
     }
 
-    /// Текст главы вокруг звучащей фразы, сама фраза подсвечена и держится на виду.
-    private var chapterText: some View {
-        let parts = readAloud.parts
-        let current = readAloud.index
-        let range = max(current - 2, 0)..<min(current + 30, parts.count)
-        return ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(range), id: \.self) { number in
-                        let part = parts[number]
-                        Text(part.spoken)
-                            .font(.system(size: part.isHeading ? 18 : 16, weight: part.isHeading ? .semibold : .regular, design: .serif))
-                            .lineSpacing(5)
-                            .foregroundStyle(number < current ? theme.textTertiary : theme.textPrimary)
-                            .padding(.horizontal, 4)
-                            .background(number == current ? theme.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 4))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(number)
-                            .onTapGesture { readAloud.jump(to: number) }
-                    }
-                }
-                .padding(18)
-            }
-            .scrollIndicators(.hidden)
-            .background(theme.sheet, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .onChange(of: current, initial: true) { _, value in
-                withAnimation(LumenMotion.standard) { proxy.scrollTo(value, anchor: UnitPoint(x: 0.5, y: 0.3)) }
-            }
+    private func iconButton(_ systemImage: String, _ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 17))
+                .foregroundStyle(theme.textSecondary)
+                .frame(width: 36, height: 44)
+                .contentShape(Rectangle())
         }
-    }
-}
-
-private struct ReadAloudChipStyle: ButtonStyle {
-    @Environment(\.lumenTheme) private var theme
-
-    func makeBody(configuration: ButtonStyleConfiguration) -> some View {
-        configuration.label
-            .frame(height: 36)
-            .background(theme.surface2, in: Capsule())
-            .opacity(configuration.isPressed ? 0.6 : 1)
+        .accessibilityLabel(title)
     }
 }
