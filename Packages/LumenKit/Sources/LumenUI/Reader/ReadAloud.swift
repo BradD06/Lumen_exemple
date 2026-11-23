@@ -61,6 +61,7 @@ final class ReadAloud {
     static let elevenStyleKey = "readAloud.elevenStyle"
     static let lumenVoiceKey = "readAloud.lumenVoice"
     static let lumenVoiceNameKey = "readAloud.lumenVoiceName"
+    static let lumenParagraphsKey = "readAloud.lumenParagraphs"
     static let voiceKey = "readAloud.voice"
     static let followKey = "readAloud.follow"
     static let highlightKey = "readAloud.highlight"
@@ -158,10 +159,20 @@ final class ReadAloud {
             lumen.voiceId = lumenVoiceId
             fallbackToApple = false
             refreshEngine()
+            // Новым голосом абзац озвучивается заново: снова с одной фразы, чтобы не ждать.
+            if lumenVoiceId != oldValue { applySplit() }
         }
     }
     var lumenVoiceName: String? = UserDefaults.standard.string(forKey: ReadAloud.lumenVoiceNameKey) {
         didSet { UserDefaults.standard.set(lumenVoiceName, forKey: Self.lumenVoiceNameKey) }
+    }
+    /// «Голос Lumen» читает абзацами, а не по предложению: так звучит связнее. С места старта
+    /// части растут понемногу (`SpeechText.ramped`), чтобы первый звук не ждал полминуты.
+    var lumenParagraphs: Bool = UserDefaults.standard.object(forKey: ReadAloud.lumenParagraphsKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(lumenParagraphs, forKey: Self.lumenParagraphsKey)
+            applySplit()
+        }
     }
     /// Голоса сервера, загружаются по запросу.
     private(set) var lumenVoices: [LumenVoiceInfo] = []
@@ -244,6 +255,8 @@ final class ReadAloud {
     @ObservationIgnored private var startsAtPlace = false
     /// Глава, текст которой звучит. Если читатель сам ушёл в другую, подсветка и место не трогаются.
     @ObservationIgnored private var chapterSection: Int?
+    /// Текст звучащей главы: из него части делятся заново, когда голос читает иначе.
+    @ObservationIgnored private var blocks: [SpeechBlock] = []
 
     private static var storedRate: Double {
         let value = UserDefaults.standard.double(forKey: rateKey)
@@ -264,6 +277,9 @@ final class ReadAloud {
         lumen.rate = rate
         lumen.voiceId = lumenVoiceId
         lumen.lumenServer = { [weak self] in self?.lumenServer }
+        // Компьютер с видеокартой готовит несколько частей сразу быстрее, чем по одной.
+        lumen.lookahead = 3
+        lumen.parallelLoads = true
         lumen.onFailure = { [weak self] error in self?.lumenFailed(error) }
         for voice in [apple, neural, lumen] as [any SpeechPlaying] {
             voice.onPart = { [weak self] number in self?.didStart(number) }
@@ -351,6 +367,7 @@ final class ReadAloud {
         artwork = nil
         showsRooms = false
         parts = []
+        blocks = []
         index = 0
         isPaused = false
         isPreparing = false
@@ -415,6 +432,16 @@ final class ReadAloud {
     /// Перейти к фразе этой главы (из полного плеера на iPhone).
     func jump(to number: Int) {
         guard parts.indices.contains(number) else { return }
+        // Целый абзац издалека голос Lumen готовил бы полминуты: с этого места снова разгон.
+        if readsParagraphs, lumen.parts != parts || !lumen.hasAudio(for: number), resplit(from: parts[number].start) {
+            if isPaused {
+                player.stop()
+                mark(parts[index], follow: true)
+            } else {
+                player.play(parts, from: index)
+            }
+            return
+        }
         index = number
         if isPaused {
             mark(parts[number], follow: true)
@@ -431,14 +458,17 @@ final class ReadAloud {
         guard self.reader === reader else { return }
         isPreparing = false
         chapterSection = reader.section
-        parts = SpeechText.parts(from: blocks)
-        language = SpeechText.language(of: parts)
+        self.blocks = blocks
+        // Язык по предложениям: от него зависит, какой голос читает, а от голоса — как делить главу.
+        let sentences = SpeechText.parts(from: blocks)
+        language = SpeechText.language(of: sentences)
         apple.language = language
         neural.language = language
         lumen.language = language
         switchEngine()
         noticeUnsupportedLanguage()
         chapterTitle = reader.currentChapterTitle
+        parts = readsParagraphs ? SpeechText.ramped(from: blocks, startingAt: offset) : sentences
         guard !parts.isEmpty else {
             // Пустая глава (обложка, картинка): сразу следующая.
             chapterFinished()
@@ -510,8 +540,42 @@ final class ReadAloud {
     /// дальше с той же фразы новым голосом.
     private func refreshEngine() {
         guard switchEngine() else { return }
-        guard isActive, !parts.isEmpty, !isPaused, !isPreparing else { return }
+        guard isActive, !parts.isEmpty, !isPreparing else { return }
+        // Новый голос может читать иначе (абзацами или по предложению).
+        if resplit(), isPaused { mark(parts[index], follow: false) }
+        guard !isPaused else { return }
         player.play(parts, from: index)
+    }
+
+    /// Абзацами читает только «Голос Lumen» и только если это не выключили.
+    private var readsParagraphs: Bool { playing == .lumen && lumenParagraphs }
+
+    /// Части главы для текущего голоса: абзацами с разгоном от места `offset` или по предложению.
+    private func split(from offset: Int) -> [SpeechPart] {
+        readsParagraphs ? SpeechText.ramped(from: blocks, startingAt: offset) : SpeechText.parts(from: blocks)
+    }
+
+    /// Делит главу заново с места `offset` (по умолчанию звучащая часть). `true`, если части
+    /// изменились; `index` тогда на части с этим местом.
+    @discardableResult
+    private func resplit(from offset: Int? = nil) -> Bool {
+        guard !blocks.isEmpty, let place = offset ?? current?.start else { return false }
+        let fresh = split(from: place)
+        guard !fresh.isEmpty, fresh != parts else { return false }
+        parts = fresh
+        index = SpeechText.index(of: place, in: fresh) ?? 0
+        return true
+    }
+
+    /// Включили или выключили «Читать абзацами»: глава звучит дальше с той же части по-новому.
+    private func applySplit() {
+        guard isActive, !isPreparing, resplit() else { return }
+        if isPaused {
+            player.stop()
+            mark(parts[index], follow: false)
+        } else {
+            player.play(parts, from: index)
+        }
     }
 
     /// Ставит голос, который должен читать; `true`, если он сменился (старый остановлен).

@@ -11,6 +11,7 @@ struct LumenVoiceSettingsSection: View {
     @State private var status: String?
     @State private var isWorking = false
     @State private var isConfirmingDelete = false
+    @State private var cacheSize = 0
     private var readAloud: ReadAloud { .shared }
 
     var body: some View {
@@ -31,6 +32,7 @@ struct LumenVoiceSettingsSection: View {
                         Text(voice.name).tag(voice.id)
                     }
                 }
+                Toggle("Читать абзацами", isOn: paragraphsBinding)
                 HStack(spacing: 10) {
                     Button("Послушать") { run { try await readAloud.playLumenSample() } }
                     Button("Проверить связь") {
@@ -44,6 +46,20 @@ struct LumenVoiceSettingsSection: View {
                     Button("Отключить", role: .destructive) { isConfirmingDelete = true }
                 }
                 .buttonStyle(.borderless)
+                // Сервер научился читать иначе (числа, ударения): старые фразы озвучатся заново.
+                if cacheSize > 0 {
+                    LabeledContent("Озвученное на устройстве") {
+                        HStack(spacing: 10) {
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(cacheSize), countStyle: .file))
+                                .foregroundStyle(theme.textSecondary)
+                            Button("Очистить") {
+                                NeuralVoiceCache.clear()
+                                cacheSize = 0
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
             } else {
                 TextField("Ссылка из окна сервера", text: $linkText, prompt: Text("https://lumen-pc….ts.net/#key=…"))
                     .autocorrectionDisabled()
@@ -73,6 +89,7 @@ struct LumenVoiceSettingsSection: View {
             Text(footer)
         }
         .task(id: readAloud.lumenServer) {
+            cacheSize = NeuralVoiceCache.size()
             guard readAloud.lumenServer != nil, readAloud.lumenVoices.isEmpty else { return }
             try? await readAloud.loadLumenVoices()
         }
@@ -88,9 +105,16 @@ struct LumenVoiceSettingsSection: View {
 
     private var footer: String {
         if readAloud.lumenServer != nil {
-            return "Голос озвучивает ваш компьютер, поэтому он должен быть включён, окно «Голос Lumen» открыто, а на этом устройстве включён Tailscale. Уже прочитанное хранится на устройстве. Книги на языках, которых голос не знает, читает голос Apple."
+            return "Голос озвучивает ваш компьютер, поэтому он должен быть включён, окно «Голос Lumen» открыто, а на этом устройстве включён Tailscale. Абзацами голос звучит связнее; первые фразы после старта он читает по одной, чтобы звук начался быстрее. Уже прочитанное хранится на устройстве: после обновления сервера нажмите «Очистить», чтобы старые фразы озвучились заново. Книги на языках, которых голос не знает, читает голос Apple."
         }
         return "Запустите на компьютере 6-server.bat из набора «Голос Lumen» и вставьте сюда ссылку из его окна, она уже с ключом. На этом устройстве должен быть включён Tailscale с тем же аккаунтом. Ключ хранится только на этом устройстве, в Связке ключей."
+    }
+
+    private var paragraphsBinding: Binding<Bool> {
+        Binding(
+            get: { readAloud.lumenParagraphs },
+            set: { readAloud.lumenParagraphs = $0 }
+        )
     }
 
     private var engineBinding: Binding<Bool> {

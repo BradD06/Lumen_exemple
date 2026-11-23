@@ -47,6 +47,53 @@ struct SpeechTextTests {
         #expect(parts.count == 2)
     }
 
+    /// Абзац из одинаковых по длине предложений.
+    private func paragraph(_ count: Int, from first: Int = 1) -> String {
+        (first..<first + count).map { "Это предложение номер \($0) в длинном абзаце." }.joined(separator: " ")
+    }
+
+    @Test func rampStartsWithOneSentenceAndGrows() {
+        let text = paragraph(40)
+        let parts = SpeechText.ramped(from: [SpeechBlock(text: text, start: 0)], startingAt: 0)
+        #expect(parts.first?.spoken == "Это предложение номер 1 в длинном абзаце.")
+        let lengths = parts.map(\.spoken.count)
+        // Части только растут, но не длиннее абзаца-предела.
+        for (left, right) in zip(lengths, lengths.dropFirst()) {
+            #expect(left <= right)
+        }
+        #expect(lengths.allSatisfy { $0 <= SpeechText.paragraphLength })
+        #expect(lengths.last! > 3 * lengths.first!)
+        // Ничего не потеряно и не повторено.
+        #expect(parts.map(\.spoken).joined(separator: " ") == text)
+    }
+
+    @Test func rampBeginsAtTheReadingPlaceAndKeepsParagraphs() throws {
+        let before = paragraph(3)
+        let text = paragraph(20, from: 4)
+        let blocks = [
+            SpeechBlock(text: before, start: 0),
+            SpeechBlock(text: text, start: before.utf16.count + 1),
+        ]
+        let place = blocks[1].start + text.utf16.count / 2
+        let parts = SpeechText.ramped(from: blocks, startingAt: place)
+        // До места чтения абзацами.
+        #expect(parts[0].spoken == before)
+        #expect(parts[1].start == blocks[1].start)
+        // С места чтения одно предложение, за ним тоже короткая часть.
+        let index = try #require(SpeechText.index(of: place, in: parts))
+        #expect(index == 2)
+        #expect(parts[index].spoken.filter { $0 == "." }.count == 1)
+        #expect(parts[index + 1].spoken.filter { $0 == "." }.count == 1)
+        // Ни одна часть не захватывает два абзаца.
+        #expect(parts.allSatisfy { $0.end <= blocks[1].start || $0.start >= blocks[1].start })
+    }
+
+    @Test func rampFromTheEndIsJustParagraphs() {
+        let parts = SpeechText.ramped(from: [SpeechBlock(text: paragraph(40), start: 0)], startingAt: .max)
+        #expect(parts.count < 5)
+        #expect(parts.allSatisfy { $0.spoken.count <= SpeechText.paragraphLength })
+    }
+
     @Test func codeIsReplacedOnceAndPageNumbersAreSkipped() {
         let blocks = [
             SpeechBlock(text: "Пример ниже.", start: 0),

@@ -397,6 +397,12 @@ public enum NeuralVoiceCache {
         }
     }
 
+    /// Фраза своего сервера уже лежит в кеше.
+    public static func has(text: String, voice: String, language: String?, server: LumenVoiceServer) -> Bool {
+        let key = server.cacheKey(text: text, voice: voice, language: language)
+        return ["mp3", "wav"].contains { FileManager.default.fileExists(atPath: directory.appending(path: "\(key).\($0)").path) }
+    }
+
     /// Звук фразы из кеша или из `fetch`, одна загрузка на фразу. Сервер голоса может прислать
     /// wav вместо mp3: файл получает своё расширение, иначе звук не прочитается для времени слов.
     static func audio(cacheKey: String, text: String, fetch: @escaping @Sendable () async throws -> NeuralAudio) async throws -> NeuralAudio {

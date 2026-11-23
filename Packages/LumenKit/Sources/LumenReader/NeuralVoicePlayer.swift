@@ -4,7 +4,8 @@ import Foundation
 /// Читает части главы голосом ElevenLabs: каждая фраза приходит mp3-файлом со временем слов
 /// (или из кеша) и играет через `AVAudioPlayer`, а `onWord` говорит, какое слово звучит.
 /// Пока звучит фраза, следующие две скачиваются по очереди (бесплатный тариф не любит много
-/// запросов сразу), поэтому между фразами нет пауз.
+/// запросов сразу), поэтому между фразами нет пауз. Свой сервер «Голос Lumen» готовит несколько
+/// частей сразу быстрее, чем по одной: ему `parallelLoads` и `lookahead` побольше.
 /// Не получилось (нет сети, ключ, кончились знаки) — `onFailure`, и читалка переходит на голос Apple.
 @MainActor
 public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
@@ -38,10 +39,12 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     /// Свой сервер «Голос Lumen» вместо ElevenLabs (`voiceId` тогда голос сервера).
     /// Адрес и ключ тоже берутся при каждой загрузке.
     public var lumenServer: (() -> LumenVoiceServer?)?
+    /// Сколько следующих частей готовить, пока звучит эта, и все ли сразу, а не по одной.
+    public var lookahead = 2
+    public var parallelLoads = false
 
     /// `AVAudioPlayer` ускоряет без смены тона только до 2×.
     public nonisolated static let rates: ClosedRange<Double> = 0.5...2
-    private static let lookahead = 2
     static let wordLead = 0.12
 
     private var audio: AVAudioPlayer?
@@ -188,8 +191,27 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         }
     }
 
+    /// Звук части уже есть или готовится: переход к ней не ждёт новой озвучки.
+    public func hasAudio(for number: Int) -> Bool {
+        guard parts.indices.contains(number) else { return false }
+        if loads[number] != nil || audioIndex == number { return true }
+        guard let voiceId, let server = lumenServer?() else { return false }
+        return NeuralVoiceCache.has(text: parts[number].spoken, voice: voiceId, language: language, server: server)
+    }
+
     private func load(_ number: Int) async throws -> NeuralAudio {
-        if let task = loads[number] { return try await task.value }
+        if let task = loads[number] {
+            let text = parts[number].spoken
+            do {
+                return try await task.value
+            } catch {
+                // Заготовленная загрузка не удалась (сеть моргнула, компьютер был занят):
+                // ещё одна попытка, если эта часть всё ещё нужна.
+                if loads[number] == task { loads[number] = nil }
+                guard !(error is CancellationError), !Task.isCancelled,
+                      parts.indices.contains(number), parts[number].spoken == text else { throw error }
+            }
+        }
         let task = try makeLoad(number)
         loads[number] = task
         do {
@@ -221,14 +243,22 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         return Task { try await NeuralVoiceCache.audio(for: speech, key: key) }
     }
 
-    /// Следующие фразы скачиваются по одной, пока звучит эта; дальние загрузки отменяются.
+    /// Следующие фразы скачиваются по одной (или все сразу, `parallelLoads`), пока звучит эта;
+    /// дальние загрузки отменяются.
     private func prefetch(after number: Int, generation current: Int) {
-        for key in Array(loads.keys) where key < number || key > number + Self.lookahead {
+        let ahead = max(lookahead, 1)
+        for key in Array(loads.keys) where key < number || key > number + ahead {
             loads[key]?.cancel()
             loads[key] = nil
         }
+        if parallelLoads {
+            for next in (number + 1)...(number + ahead) where next < parts.count && loads[next] == nil {
+                if let task = try? makeLoad(next) { loads[next] = task }
+            }
+            return
+        }
         Task { [weak self] in
-            for next in (number + 1)...(number + Self.lookahead) {
+            for next in (number + 1)...(number + ahead) {
                 guard let self, self.generation == current, next < self.parts.count else { return }
                 _ = try? await self.load(next)
             }
