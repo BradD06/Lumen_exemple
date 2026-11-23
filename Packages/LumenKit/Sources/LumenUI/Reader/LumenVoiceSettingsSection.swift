@@ -31,6 +31,7 @@ struct LumenVoiceSettingsSection: View {
                         Text(voice.name).tag(voice.id)
                     }
                 }
+                Toggle("Читать абзацами", isOn: paragraphsBinding)
                 HStack(spacing: 10) {
                     Button("Послушать") { run { try await readAloud.playLumenSample() } }
                     Button("Проверить связь") {
@@ -88,9 +89,16 @@ struct LumenVoiceSettingsSection: View {
 
     private var footer: String {
         if readAloud.lumenServer != nil {
-            return "Голос озвучивает ваш компьютер, поэтому он должен быть включён, окно «Голос Lumen» открыто, а на этом устройстве включён Tailscale. Уже прочитанное хранится на устройстве. Книги на языках, которых голос не знает, читает голос Apple."
+            return "Голос озвучивает ваш компьютер, поэтому он должен быть включён, окно «Голос Lumen» открыто, а на этом устройстве включён Tailscale. Абзацами голос звучит связнее; первые фразы после старта он читает по одной, чтобы звук начался быстрее. Уже прочитанное хранится на устройстве. Книги на языках, которых голос не знает, читает голос Apple."
         }
         return "Запустите на компьютере 6-server.bat из набора «Голос Lumen» и вставьте сюда ссылку из его окна, она уже с ключом. На этом устройстве должен быть включён Tailscale с тем же аккаунтом. Ключ хранится только на этом устройстве, в Связке ключей."
+    }
+
+    private var paragraphsBinding: Binding<Bool> {
+        Binding(
+            get: { readAloud.lumenParagraphs },
+            set: { readAloud.lumenParagraphs = $0 }
+        )
     }
 
     private var engineBinding: Binding<Bool> {

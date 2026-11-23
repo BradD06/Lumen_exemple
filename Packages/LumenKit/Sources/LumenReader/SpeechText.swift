@@ -26,7 +26,8 @@ public struct SpeechBlock: Codable, Hashable, Sendable {
     }
 }
 
-/// Часть текста, которую голос говорит целиком и которая подсвечена, пока звучит: предложение.
+/// Часть текста, которую голос говорит целиком и которая подсвечена, пока звучит: предложение
+/// (или абзац у голоса, который читает абзацами, см. `SpeechText.ramped`).
 public struct SpeechPart: Hashable, Sendable {
     /// Что сказать: без переносов, лишних пробелов и номеров сносок.
     public var spoken: String
@@ -59,6 +60,32 @@ public enum SpeechText {
     public static let maxPartLength = 320
 
     public static func parts(from blocks: [SpeechBlock], groupLength: Int = 0) -> [SpeechPart] {
+        var grouping = Grouping(limit: groupLength)
+        return parts(from: blocks, grouping: &grouping)
+    }
+
+    /// Самый длинный абзац одной частью у голоса, который читает абзацами; длиннее режется по предложениям.
+    public static let paragraphLength = 600
+    /// Насколько каждая следующая часть может быть длиннее: доля уже прочитанного после старта.
+    public static let rampGrowth = 0.3
+
+    /// Части абзацами для голоса, который озвучивает лишь чуть быстрее речи («Голос Lumen» с домашнего
+    /// компьютера). Целый абзац с места старта он готовил бы полминуты, поэтому с места `offset` идёт
+    /// одно предложение, а дальше части растут: каждая не длиннее первой плюс `growth` от уже прочитанного,
+    /// пока не станут целыми абзацами до `limit` знаков. Пока звучат первые части, голос успевает
+    /// приготовить следующие, и пауз между ними нет. Части не переходят через границу абзаца;
+    /// до места старта текст идёт абзацами.
+    public static func ramped(
+        from blocks: [SpeechBlock],
+        startingAt offset: Int,
+        limit: Int = paragraphLength,
+        growth: Double = rampGrowth
+    ) -> [SpeechPart] {
+        var grouping = Grouping(limit: limit, rampStart: offset, growth: growth)
+        return parts(from: blocks, grouping: &grouping)
+    }
+
+    static func parts(from blocks: [SpeechBlock], grouping: inout Grouping) -> [SpeechPart] {
         var result: [SpeechPart] = []
         for original in blocks {
             // Переносы строк внутри абзаца (в EPUB их полно) разбивщик принял бы за конец
@@ -76,14 +103,16 @@ public enum SpeechText {
                     continue
                 }
                 result.append(SpeechPart(spoken: codeNotice, start: block.start, length: length))
+                grouping.counted(result[result.count - 1])
             case .heading:
                 guard !isNoise(block.text),
                       let range = trimmed(block.text, in: block.text.startIndex..<block.text.endIndex) else { continue }
                 result.append(part(block, range, isHeading: true))
+                grouping.counted(result[result.count - 1])
             case .text:
                 guard !isNoise(block.text) else { continue }
                 let pieces = sentences(in: block.text).flatMap { cut(block.text, $0) }
-                for range in group(block.text, pieces, upTo: groupLength) {
+                for range in grouping.group(block.text, pieces, at: block.start) {
                     guard let range = trimmed(block.text, in: range) else { continue }
                     let made = part(block, range, isHeading: false)
                     if hasWords(made.spoken) { result.append(made) }
@@ -153,6 +182,71 @@ public enum SpeechText {
         }
         pieces.append(start..<range.upperBound)
         return pieces
+    }
+
+    /// Как склеивать предложения абзаца в части: до `limit` знаков, а с разгоном от места
+    /// `rampStart` — сначала одно предложение, потом всё длиннее (`ramped`).
+    struct Grouping {
+        var limit: Int
+        var rampStart: Int?
+        var growth: Double = 0
+        /// Длина части, с которой начинается чтение, и сколько знаков прочитано после старта.
+        private(set) var first: Int?
+        private(set) var played = 0
+
+        /// Совсем короткая первая фраза («— Да.») не должна держать разгон на месте.
+        static let shortestFirst = 60
+
+        init(limit: Int, rampStart: Int? = nil, growth: Double = 0) {
+            self.limit = limit
+            self.rampStart = rampStart
+            self.growth = growth
+        }
+
+        /// Заголовок или пропущенный код после старта тоже звучит и даёт голосу время.
+        mutating func counted(_ part: SpeechPart) {
+            guard first != nil else { return }
+            played += part.spoken.count
+        }
+
+        mutating func group(_ text: String, _ pieces: [Range<String.Index>], at blockStart: Int) -> [Range<String.Index>] {
+            guard let start = rampStart else { return SpeechText.group(text, pieces, upTo: limit) }
+            var result: [Range<String.Index>] = []
+            var current: Range<String.Index>?
+            var currentAfter = false
+            for piece in pieces {
+                // Конец без пробелов, как у части: так же считает `index(of:in:)`.
+                let last = SpeechText.trimmed(text, in: piece)?.upperBound ?? piece.upperBound
+                let after = blockStart + text.utf16.distance(from: text.startIndex, to: last) > start
+                if after, first == nil {
+                    // Предложение, с которого начинается чтение: отдельной частью.
+                    if let current { result.append(current) }
+                    let length = text.distance(from: piece.lowerBound, to: piece.upperBound)
+                    first = max(length, Self.shortestFirst)
+                    played += length
+                    result.append(piece)
+                    current = nil
+                    continue
+                }
+                let budget = after ? min(limit, (first ?? 0) + Int(growth * Double(played))) : limit
+                if let joined = current, currentAfter == after,
+                   text.distance(from: joined.lowerBound, to: piece.upperBound) <= budget {
+                    current = joined.lowerBound..<piece.upperBound
+                    continue
+                }
+                if let done = current {
+                    result.append(done)
+                    if currentAfter { played += text.distance(from: done.lowerBound, to: done.upperBound) }
+                }
+                current = piece
+                currentAfter = after
+            }
+            if let done = current {
+                result.append(done)
+                if currentAfter { played += text.distance(from: done.lowerBound, to: done.upperBound) }
+            }
+            return result
+        }
     }
 
     /// Склеивает соседние куски, пока часть короче `length` знаков.
