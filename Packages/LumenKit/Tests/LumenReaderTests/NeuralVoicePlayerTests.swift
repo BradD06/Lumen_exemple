@@ -29,6 +29,7 @@ struct NeuralVoicePlayerTests {
         var started: [Int] = []
         var waited: [NeuralVoiceError] = []
         var failed: NeuralVoiceError?
+        var loading: [Bool] = []
     }
 
     private func makePlayer(for server: FlakyServer, delays: [Double] = [0.01, 0.01, 0.01]) -> (NeuralVoicePlayer, Events) {
@@ -40,6 +41,7 @@ struct NeuralVoicePlayerTests {
         player.onPart = { events.started.append($0) }
         player.onWaiting = { events.waited.append($0) }
         player.onFailure = { events.failed = $0 }
+        player.onLoading = { events.loading.append($0) }
         return (player, events)
     }
 
@@ -61,6 +63,28 @@ struct NeuralVoicePlayerTests {
         #expect(events.waited == [.serverUnreachable])
         #expect(await server.calls == 3)
         player.stop()
+    }
+
+    @Test func loadingIsReportedUntilTheSoundStarts() async {
+        let server = FlakyServer(failures: 1)
+        let (player, events) = makePlayer(for: server)
+        player.play(part, from: 0)
+        await waitFor(events)
+        // Пока ждали звук (и повторяли после сбоя) — «готовится», звук пошёл — нет.
+        #expect(events.loading == [true, false])
+        player.stop()
+        #expect(events.loading == [true, false])
+    }
+
+    @Test func stoppingWhileLoadingEndsTheLoading() async {
+        let server = FlakyServer(failures: 100)
+        let (player, events) = makePlayer(for: server, delays: [5])
+        player.play(part, from: 0)
+        for _ in 0..<100 where events.loading.isEmpty {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        player.stop()
+        #expect(events.loading == [true, false])
     }
 
     @Test func wrongKeyFailsAtOnce() async {
