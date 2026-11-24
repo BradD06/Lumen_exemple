@@ -136,7 +136,7 @@ struct SidePageTests {
         #expect(page.sourceId == nil)
     }
 
-    @Test func readingTimeCountsOnlyActiveStretches() async throws {
+    @Test func readingTimeSplitsAtLongPauses() async throws {
         let source = try await db.addSource(
             title: "Книга", format: .epub, file: "missing.epub", originalName: "Книга.epub"
         )
@@ -145,14 +145,32 @@ struct SidePageTests {
         let start = Date().addingTimeInterval(60)
         model.noteActivity(at: start)
         model.noteActivity(at: start.addingTimeInterval(120))
-        // Долгий перерыв не засчитывается, счёт идёт дальше с нового действия.
-        model.noteActivity(at: start.addingTimeInterval(120 + ReaderModel.idleLimit + 60))
-        model.noteActivity(at: start.addingTimeInterval(120 + ReaderModel.idleLimit + 90))
+        let first = try #require(model.readingSession)
+        #expect(first.seconds >= 180 && first.seconds < 200)
 
-        let session = try #require(model.readingSession)
-        #expect(session.seconds >= 150 && session.seconds < 220)
+        // Долгий перерыв не засчитывается: с нового действия идёт новый отрезок.
+        let back = start.addingTimeInterval(120 + ReaderModel.idleLimit + 60)
+        model.noteActivity(at: back)
+        model.noteActivity(at: back.addingTimeInterval(30))
+        let second = try #require(model.readingSession)
+        #expect(second.id != first.id)
+        #expect(second.startedAt == back)
+        #expect(abs(second.seconds - 30) < 0.01)
+        // Время между началом и концом отрезка и есть время чтения.
+        #expect(abs(second.endedAt.timeIntervalSince(second.startedAt) - second.seconds) < 0.01)
 
-        try await db.saveReadingSession(session)
-        #expect(try await db.readingStats(of: source.id).totalSeconds == session.seconds)
+        try await db.saveReadingSession(first)
+        try await db.saveReadingSession(second)
+        let total = try await db.readingStats(of: source.id).totalSeconds
+        #expect(abs(total - (first.seconds + second.seconds)) < 0.01)
+    }
+
+    @Test func sessionLineShowsTwoDigitMinutesAndPauses() {
+        let start = Calendar.current.date(bySettingHour: 11, minute: 0, second: 10, of: Date())!
+        let short = ReadingSession(sourceId: UUID(), startedAt: start, endedAt: start.addingTimeInterval(110), seconds: 110)
+        #expect(ReadingText.session(short) == "11:00–11:02 · 2 мин")
+        // Старый отрезок: 44 минуты между началом и концом, читали из них 8.
+        let old = ReadingSession(sourceId: UUID(), startedAt: start, endedAt: start.addingTimeInterval(44 * 60), seconds: 8 * 60)
+        #expect(ReadingText.session(old) == "11:00–11:44 · 8 мин, с перерывами")
     }
 }

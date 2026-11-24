@@ -250,10 +250,11 @@ struct SourceDashboardView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("\(ReadingText.time(session.startedAt))–\(ReadingText.time(session.endedAt)) · \(ReadingStats.format(session.seconds, short: true))")
+                        Text(ReadingText.session(session))
                             .font(.caption)
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                         GeometryReader { geometry in
                             ZStack(alignment: .leading) {
                                 Capsule().fill(theme.textPrimary.opacity(0.1))
@@ -263,7 +264,7 @@ struct SourceDashboardView: View {
                         }
                         .frame(height: 4)
                     }
-                    Text(session.progressGain.map { gain in gain < 0.005 ? "<1%" : "+\(ReadingText.percent(gain))" } ?? "")
+                    Text(session.progressGain.map { gain in gain == 0 ? "0%" : gain < 0.005 ? "<1%" : "+\(ReadingText.percent(gain))" } ?? "")
                         .font(.caption.weight(.semibold).monospacedDigit())
                         .foregroundStyle(theme.accent)
                         .frame(width: 44, alignment: .trailing)
