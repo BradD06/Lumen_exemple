@@ -156,16 +156,12 @@ struct BookShelf: View {
                 ShelfDisplayPicker(display: display, showsTitles: false, onPick: pickDisplay)
                 ShelfSortPicker(sort: sort, onPick: choose, compact: true)
             }
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .center, spacing: 10) {
-                    statusPicker
-                    Spacer(minLength: 0)
-                    ShelfSortPicker(sort: sort, onPick: choose, compact: true)
-                }
-                HStack(alignment: .center, spacing: 10) {
-                    ShelfSearchField(text: $query)
-                    ShelfDisplayPicker(display: display, showsTitles: false, onPick: pickDisplay)
-                }
+            // iPhone: всё в одну строку, фильтр и порядок круглыми кнопками-значками.
+            HStack(alignment: .center, spacing: 8) {
+                ShelfSearchField(text: $query)
+                ShelfDisplayPicker(display: display, showsTitles: false, onPick: pickDisplay)
+                ShelfStatusPicker(status: status, books: snapshot.books, onPick: pickStatus, iconOnly: true)
+                ShelfSortPicker(sort: sort, onPick: choose, iconOnly: true)
             }
         }
     }
@@ -1552,35 +1548,52 @@ struct ShelfStatusPicker: View {
     let status: ShelfStatus
     let books: [Source]
     var onPick: (ShelfStatus) -> Void
+    /// Сразу круглая кнопка-значок: на iPhone она стоит в строке поиска.
+    var iconOnly = false
 
     @Environment(\.lumenTheme) private var theme
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 4) {
-                ForEach(ShelfStatus.allCases) { option in
-                    chip(option)
-                }
+        if iconOnly {
+            menu {
+                // Фильтр включён: значок в цвете акцента, чтобы было видно, что полка отобрана.
+                ShelfIconButton(systemImage: "line.3.horizontal.decrease", isActive: status != .all)
             }
-            .padding(3)
-            .lumenGlass(Capsule())
-            Menu {
-                Picker("Какие книги", selection: Binding(get: { status }, set: onPick)) {
+            .accessibilityLabel("Какие книги: \(status.title)")
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
                     ForEach(ShelfStatus.allCases) { option in
-                        Text("\(option.title) · \(option.count(in: books))").tag(option)
+                        chip(option)
                     }
                 }
-                .pickerStyle(.inline)
-            } label: {
-                Label("\(status.title) · \(status.count(in: books))", systemImage: "line.3.horizontal.decrease")
-                    .font(.subheadline.weight(.semibold))
+                .padding(3)
+                .lumenGlass(Capsule())
+                menu {
+                    Label("\(status.title) · \(status.count(in: books))", systemImage: "line.3.horizontal.decrease")
+                        .labelStyle(.titleAndIcon)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(theme.textPrimary)
+                }
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .foregroundStyle(theme.textPrimary)
-            .fixedSize()
-            .accessibilityIdentifier("shelf-status-menu")
         }
+    }
+
+    private func menu<Content: View>(@ViewBuilder label: () -> Content) -> some View {
+        Menu {
+            Picker("Какие книги", selection: Binding(get: { status }, set: onPick)) {
+                ForEach(ShelfStatus.allCases) { option in
+                    Text("\(option.title) · \(option.count(in: books))").tag(option)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            label()
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityIdentifier("shelf-status-menu")
     }
 
     private func chip(_ option: ShelfStatus) -> some View {
@@ -1598,10 +1611,10 @@ struct ShelfStatusPicker: View {
             .lineLimit(1)
             .padding(.horizontal, 12)
             .frame(minHeight: 30)
-            .foregroundStyle(isOn ? theme.onAccent : theme.textPrimary)
+            .foregroundStyle(isOn ? theme.onInk : theme.textPrimary)
             .background {
                 if isOn {
-                    Capsule().fill(theme.textPrimary)
+                    Capsule().fill(theme.ink)
                 }
             }
             .contentShape(Capsule())
@@ -1619,11 +1632,24 @@ struct ShelfSortPicker: View {
     var onPick: (ShelfSort) -> Void
     /// Сразу меню: рядом с поиском и видом полки для кнопок нет места.
     var compact = false
+    /// Меню круглой кнопкой-значком: на iPhone она стоит в строке поиска.
+    var iconOnly = false
 
     @Environment(\.lumenTheme) private var theme
 
     var body: some View {
-        if compact {
+        if iconOnly {
+            Menu {
+                picker
+            } label: {
+                ShelfIconButton(systemImage: "arrow.up.arrow.down", isActive: true)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .fixedSize()
+            .accessibilityLabel("Порядок на полке: \(sort.title)")
+            .accessibilityIdentifier("shelf-sort-menu")
+        } else if compact {
             menu
         } else {
             ViewThatFits(in: .horizontal) {
@@ -1637,14 +1663,19 @@ struct ShelfSortPicker: View {
         }
     }
 
+    private var picker: some View {
+        Picker("Порядок на полке", selection: Binding(get: { sort }, set: onPick)) {
+            ForEach(ShelfSort.allCases) { Text($0.title).tag($0) }
+        }
+        .pickerStyle(.inline)
+    }
+
     private var menu: some View {
         Menu {
-            Picker("Порядок на полке", selection: Binding(get: { sort }, set: onPick)) {
-                ForEach(ShelfSort.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.inline)
+            picker
         } label: {
             Label(sort.title, systemImage: "arrow.up.arrow.down")
+                .labelStyle(.titleAndIcon)
                 .font(.caption.weight(.semibold))
         }
         .menuStyle(.button)

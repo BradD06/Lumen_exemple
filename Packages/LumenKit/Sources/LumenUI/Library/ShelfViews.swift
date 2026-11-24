@@ -56,6 +56,24 @@ struct ShelfSearchField: View {
     }
 }
 
+/// Круглая стеклянная кнопка-значок высотой с поле поиска: метка меню фильтра и порядка на iPhone.
+/// Размер задан явно: иначе метка меню на iOS растягивается по высоте и строка разъезжается.
+struct ShelfIconButton: View {
+    let systemImage: String
+    var isActive = false
+
+    @Environment(\.lumenTheme) private var theme
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(isActive ? theme.accent : theme.textPrimary)
+            .frame(width: 36, height: 36)
+            .lumenGlass(Circle())
+            .contentShape(Circle())
+    }
+}
+
 /// «Корешки · Обложки · Список». Где места мало, остаются одни значки.
 struct ShelfDisplayPicker: View {
     let display: ShelfDisplay
@@ -91,10 +109,10 @@ struct ShelfDisplayPicker: View {
             .lineLimit(1)
             .padding(.horizontal, showsTitles ? 12 : 10)
             .frame(minHeight: 30)
-            .foregroundStyle(isOn ? theme.onAccent : theme.textPrimary)
+            .foregroundStyle(isOn ? theme.onInk : theme.textPrimary)
             .background {
                 if isOn {
-                    Capsule().fill(theme.textPrimary)
+                    Capsule().fill(theme.ink)
                 }
             }
             .contentShape(Capsule())
