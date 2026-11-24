@@ -92,11 +92,11 @@ LumenUI ─┬─> LumenReader ─> LumenCore
 
 **Экраны читают базу** через снимки из `LumenStorage/Queries.swift` (`SidebarSnapshot`, `LibrarySnapshot`, `ShelfSnapshot`, `HomeSnapshot`, `TrashSnapshot`, `PageLinksSnapshot`) и `ReadingRepository.swift` (`SourceDashboardSnapshot`, `HomeReadingSnapshot`, `ReadingOverviewSnapshot`, `ShelfReadingSnapshot`), наблюдаемые через GRDB `ValueObservation`.
 
-**Читалка.** `ReaderModel.open` → `DocumentConverter` (`LumenReader/ReadableDocument.swift`) делает HTML для `WebReaderController`, PDF идёт в `PDFReaderController`. Место чтения `saveReadingPosition` / `setReadingLocator`, выделения `addHighlight`, время `saveReadingSession`. Заметки книги создаются лениво: `ReaderModel.ensureNotes()` → `SourceRepository.notesPage` / `bookNotesPage`.
+**Читалка.** `ReaderModel.open` → `DocumentConverter` (`LumenReader/ReadableDocument.swift`) делает HTML для `WebReaderController`, PDF идёт в `PDFReaderController`. Место чтения `saveReadingPosition` / `setReadingLocator` (записывается, только если сдвинулось: `ReaderModel.placeToSave`, «то же место на другом экране» решает `LumenCore/ReadingPlace`; открытая книга следит за своим местом в базе, `watchPlace` → `placeChanged`, и переходит туда, где дочитали или дослушали на другом устройстве), выделения `addHighlight`, время `saveReadingSession`. Заметки книги создаются лениво: `ReaderModel.ensureNotes()` → `SourceRepository.notesPage` / `bookNotesPage`.
 
 **Синхронизация.**
 - Журнал: каждая запись в синк-таблицы попадает в `syncChange` триггерами (`LumenStorage/SyncSchema.swift`: `SyncTable`, `createSyncTriggers`, `createSyncClock`, `createSyncClockTriggers`), даже когда синк выключен.
-- Через папку (по умолчанию): `LumenSync/FolderSyncController.swift` (UI-сторона, закладка папки, `turnOnInICloudDrive`) → `LumenStorage/FolderSync.swift` (`FolderSyncEngine`: пишет свои файлы в `Lumen Sync/devices/<id>/`, читает чужие) → `FolderSyncRepository.swift` (`folderSyncOutgoing`, `applyFolderEntries`, побеждает поздний `syncClock.changedAt`). Совет, куда класть папку: `FolderSyncPlace.swift`.
+- Через папку (по умолчанию): `LumenSync/FolderSyncController.swift` (UI-сторона, закладка папки, `turnOnInICloudDrive`) → `LumenStorage/FolderSync.swift` (`FolderSyncEngine`: пишет свои файлы в `Lumen Sync/devices/<id>/`, читает чужие) → `FolderSyncRepository.swift` (`folderSyncOutgoing`, `applyFolderEntries`, побеждает поздний `syncClock.changedAt`). Совет, куда класть папку: `FolderSyncPlace.swift`. Уход в фон: `FolderSyncController.syncBeforeSuspend` (на iPhone просит у системы время, чтобы место чтения успело уехать); на Mac круг и при возвращении в приложение (`observeActivation`).
 - CloudKit (выключен): `LumenSync/CloudSync.swift` + `LumenStorage/SyncRepository.swift`.
 - UI: `SyncSetupViews.swift`, `SyncStatusRow.swift`, `Backup/DataSafetyView.swift`.
 
@@ -183,6 +183,7 @@ LumenUI ─┬─> LumenReader ─> LumenCore
 | `Source.swift` | `Source`, `SourceFormat`, `SourceLocator`, `Highlight`, `HighlightColor`, `ExcerptReference` |
 | `LumenLink.swift` | `lumen://page/…`, `source/…`, `…/highlight/…`, `…/place?…` |
 | `ReadingStats.swift`, `ReadingInsights.swift` | `ReadingSession`, `ReadingStats`, `ReadingForecast`, `ReadingOverview` |
+| `ReadingPlace.swift` | `ReadingPlace.isSame`: то же место чтения на экране другой ширины (пара строк, та же высота страницы PDF) |
 | `ShelfSort.swift`, `ShelfDisplay.swift` | `ShelfSort`, `ShelfGroup`, `ShelfNote`, `ShelfStatus`; `ShelfDisplay`, `ShelfSearch` |
 | `BookDuplicates.swift` | поиск дублей книг |
 | `DataTable.swift` | базы: `DataTable`, `PropertyType`, `PropertyDefinition`, `PropertyValue`, `DataView`, `DataFilter`, `DataSort`, `DataQuery` (фильтры и сортировки в памяти), `DataTableTemplate` |
