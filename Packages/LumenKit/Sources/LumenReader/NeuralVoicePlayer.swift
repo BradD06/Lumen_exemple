@@ -17,6 +17,9 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     public var onFailure: ((NeuralVoiceError) -> Void)?
     /// Связь пропала или компьютер занят: голос ждёт и пробует снова, а не сразу уходит на Apple.
     public var onWaiting: ((NeuralVoiceError) -> Void)?
+    /// Голос ждёт звук фразы (`true`) или звук пошёл, чтение встало (`false`): по нему плеер
+    /// показывает, что озвучка не зависла, а фраза готовится.
+    public var onLoading: ((Bool) -> Void)?
 
     public private(set) var parts: [SpeechPart] = []
     public private(set) var index = 0
@@ -66,6 +69,9 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
     private var wordTask: Task<Void, Never>?
     private let delegate = Delegate()
     private let silence = SilentAudio()
+    private var isLoading = false {
+        didSet { if isLoading != oldValue { onLoading?(isLoading) } }
+    }
 
     public override init() {
         super.init()
@@ -143,6 +149,7 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         audio = nil
         audioIndex = nil
         silence.stop()
+        isLoading = false
         if !keepLoads {
             loads.values.forEach { $0.cancel() }
             loads = [:]
@@ -162,12 +169,14 @@ public final class NeuralVoicePlayer: NSObject, SpeechPlaying {
         startTask = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard let self, self.generation == current else { return }
+            self.isLoading = true
             // Пока часть озвучивается, звучит тишина: в фоне iOS не усыпит приложение посреди запроса.
             if !self.isPaused { self.silence.start() }
             do {
                 let sound = try await self.loadWaiting(number, generation: current)
                 guard self.generation == current, self.isPlaying else { return }
                 self.silence.stop()
+                self.isLoading = false
                 let player = try AVAudioPlayer(data: sound.data)
                 player.enableRate = true
                 player.rate = Float(Self.playbackRate(self.rate))

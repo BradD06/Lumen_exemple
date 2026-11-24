@@ -78,6 +78,8 @@ final class ReadAloud {
     private(set) var isPaused = false
     /// Текст главы ещё готовится (открывается следующая глава, PDF переходит в «Текст»).
     private(set) var isPreparing = false
+    /// Нейроголос ждёт звук фразы дольше мгновения (компьютер или ElevenLabs её ещё озвучивают).
+    private(set) var isFetching = false
     private(set) var sleepTimer: SleepTimer = .off
     private(set) var sleepDeadline: Date?
     /// Голос выбранного языка книги.
@@ -88,6 +90,9 @@ final class ReadAloud {
 
     var isActive: Bool { sourceId != nil }
     var isPlaying: Bool { isActive && !isPaused }
+    /// Голос молчит, потому что звук ещё готовится: плеер крутит значок, чтобы было видно,
+    /// что чтение не зависло.
+    var isWaitingForSound: Bool { isPlaying && (isPreparing || isFetching) }
 
     var rate: Double = ReadAloud.storedRate {
         didSet {
@@ -259,6 +264,8 @@ final class ReadAloud {
         }
     }
     @ObservationIgnored private var sleepTask: Task<Void, Never>?
+    /// Показывает «готовится» с небольшой задержкой: фраза из кеша приходит за миг и не мигает.
+    @ObservationIgnored private var fetchTask: Task<Void, Never>?
     /// Ждёт, когда компьютер с «Голосом Lumen» снова ответит.
     @ObservationIgnored private var recoveryTask: Task<Void, Never>?
     /// Компьютер ответил: со следующей фразы Apple снова читает «Голос Lumen».
@@ -297,6 +304,9 @@ final class ReadAloud {
         lumen.parallelLoads = true
         lumen.onFailure = { [weak self] error in self?.lumenFailed(error) }
         lumen.onWaiting = { [weak self] error in self?.lumenWaiting(error) }
+        for voice in [neural, lumen] {
+            voice.onLoading = { [weak self] loading in self?.loadingChanged(loading) }
+        }
         for voice in [apple, neural, lumen] as [any SpeechPlaying] {
             voice.onPart = { [weak self] number in self?.didStart(number) }
             voice.onWord = { [weak self] number, range in self?.didSpeak(range, of: number) }
@@ -390,11 +400,26 @@ final class ReadAloud {
         index = 0
         isPaused = false
         isPreparing = false
+        loadingChanged(false)
         setSleepTimer(.off)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         #if os(macOS)
         MPNowPlayingInfoCenter.default().playbackState = .stopped
         #endif
+    }
+
+    private func loadingChanged(_ loading: Bool) {
+        fetchTask?.cancel()
+        fetchTask = nil
+        guard loading else {
+            isFetching = false
+            return
+        }
+        fetchTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.isFetching = true
+        }
     }
 
     func setSleepTimer(_ timer: SleepTimer) {

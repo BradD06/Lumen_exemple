@@ -83,6 +83,54 @@ struct ReadAloudProgress: View {
 
 /// Остров в читалке, пока книга звучит: «Разделы» | обложка, глава, полоска |
 /// фраза назад · пауза · фраза вперёд | скорость, голос | «В заметки», таймер, стоп.
+/// Крутящаяся дуга вокруг кнопки паузы, пока звук фразы ещё готовится (компьютер с «Голосом Lumen»
+/// или ElevenLabs озвучивают её, открывается глава): видно, что чтение не зависло. Сама читает
+/// состояние, поэтому меняется только она, а не весь плеер.
+struct ReadAloudWaitRing: View {
+    var size: CGFloat
+    var lineWidth: CGFloat = 2.5
+
+    @Environment(\.lumenTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var readAloud: ReadAloud { .shared }
+
+    var body: some View {
+        ZStack {
+            if readAloud.isWaitingForSound {
+                arc.transition(.opacity)
+            }
+        }
+        .frame(width: size, height: size)
+        .animation(LumenMotion.quick, value: readAloud.isWaitingForSound)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var arc: some View {
+        if reduceMotion {
+            Circle().stroke(theme.accent.opacity(0.7), lineWidth: lineWidth)
+        } else {
+            TimelineView(.animation) { context in
+                let turn = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.1) / 1.1
+                Circle()
+                    .trim(from: 0, to: 0.3)
+                    .stroke(theme.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(turn * 360))
+            }
+        }
+    }
+}
+
+extension ReadAloud {
+    /// Вторая строка плеера, пока звука ещё нет.
+    var waitingStatus: String? {
+        if isPreparing { return "Готовлю главу…" }
+        if isWaitingForSound { return "Озвучиваю фразу…" }
+        return nil
+    }
+}
+
 struct ReadAloudBar: View {
     var onRooms: () -> Void
 
@@ -146,7 +194,7 @@ struct ReadAloudBar: View {
     }
 
     private var status: String {
-        if readAloud.isPreparing { return "Готовлю главу…" }
+        if let waiting = readAloud.waitingStatus { return waiting }
         return "\(ReadAloudFormat.clock(readAloud.elapsed)) · до конца главы \(ReadAloudFormat.minutes(readAloud.remaining))"
     }
 
@@ -170,9 +218,11 @@ struct ReadAloudBar: View {
                 .frame(width: 42, height: 42)
                 .background(theme.ink, in: Circle())
                 .contentTransition(.symbolEffect(.replace))
+                .overlay { ReadAloudWaitRing(size: 50) }
         }
         .help(readAloud.isPaused ? "Продолжить" : "Пауза")
         .accessibilityLabel(readAloud.isPaused ? "Продолжить" : "Пауза")
+        .accessibilityValue(readAloud.isWaitingForSound ? "Фраза готовится" : "")
         .keyHint(readAloud.isPaused ? "Продолжить" : "Пауза") { readAloud.togglePause() }
     }
 
@@ -258,6 +308,7 @@ struct ReadAloudRing: View {
                     .foregroundStyle(theme.onInk)
                     .frame(width: 20, height: 20)
                     .background(theme.ink, in: Circle())
+                    .overlay { ReadAloudWaitRing(size: 26, lineWidth: 2) }
             }
             .buttonStyle(.plain)
             .offset(x: -2, y: -2)
@@ -586,8 +637,10 @@ struct PhoneMiniPlayer: View {
                     .frame(width: 42, height: 42)
                     .background(theme.ink, in: Circle())
                     .contentTransition(.symbolEffect(.replace))
+                    .overlay { ReadAloudWaitRing(size: 50) }
             }
             .accessibilityLabel(readAloud.isPaused ? "Продолжить" : "Пауза")
+            .accessibilityValue(readAloud.isWaitingForSound ? "Фраза готовится" : "")
             if isInReader {
                 iconButton("forward.end.fill", "Фраза вперёд") { readAloud.next() }
             }
@@ -623,7 +676,7 @@ struct PhoneMiniPlayer: View {
     }
 
     private var status: String {
-        if readAloud.isPreparing { return "Готовлю главу…" }
+        if let waiting = readAloud.waitingStatus { return waiting }
         var parts = [readAloud.voiceName]
         if abs(readAloud.rate - 1) > 0.01 { parts.append(ReadAloudFormat.rate(readAloud.rate)) }
         parts.append("ещё \(ReadAloudFormat.minutes(readAloud.remaining))")
