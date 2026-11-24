@@ -133,6 +133,18 @@ final class ReaderModel {
     @ObservationIgnored private var hasRestoredPosition = false
     /// Где остановились в прошлый раз.
     @ObservationIgnored private var savedLocator: SourceLocator?
+    /// Место, на котором книгу открыли (или куда её перенесло с другого устройства). Пока читают
+    /// рядом с ним, место не записывается: на другом экране вверху другая строка, и такая запись
+    /// со свежим временем перебила бы место, до которого дочитали на другом устройстве (`ReadingPlace`).
+    @ObservationIgnored private var openedPlace: SourceLocator?
+    /// Место, которое сейчас в базе: своё записанное или пришедшее с другого устройства.
+    @ObservationIgnored private var storedPlace: SourceLocator?
+    /// Когда книга открывалась в базе последний раз: по нему видно, что место записало чтение
+    /// на другом устройстве, а не ссылка на место.
+    @ObservationIgnored private var seenOpenedAt: Date?
+    /// Когда книгу перенесло на место с другого устройства: её прокрутка туда не чтение здесь.
+    @ObservationIgnored private var movedFromElsewhereAt: Date?
+    @ObservationIgnored private var placeObservation: Task<Void, Never>?
     /// Какая глава сейчас загружена в веб-вид.
     @ObservationIgnored private var loadedSection: Int?
     /// Время чтения за этот раз: растёт, пока человек листает, выделяет и пишет.
@@ -162,10 +174,10 @@ final class ReaderModel {
                 splitsColumns = UserDefaults.standard.bool(forKey: columnsKey)
             }
             self.source = source
-            savedLocator = source.locator
-            section = source.locator?.section ?? 0
-            sectionProgression = source.locator?.progression ?? 0
-            sectionTextOffset = source.locator?.textOffset
+            startAt(source.locator)
+            storedPlace = source.locator
+            seenOpenedAt = source.lastOpenedAt
+            watchPlace()
             highlights = try await database.reader.read { [sourceId] db in
                 try Highlight
                     .filter(Column("sourceId") == sourceId && Column("deletedAt") == nil)
@@ -397,6 +409,79 @@ final class ReaderModel {
         default:
             content = .quickLook(url)
         }
+    }
+
+    /// С этого места книга откроется.
+    private func startAt(_ locator: SourceLocator?) {
+        savedLocator = locator
+        openedPlace = locator
+        section = locator?.section ?? 0
+        sectionProgression = locator?.progression ?? 0
+        sectionTextOffset = locator?.textOffset
+    }
+
+    /// Место в базе поменялось не отсюда: дочитали или дослушали на другом устройстве
+    /// (пришло синхронизацией) или открыли ссылку на место. Открытая книга переходит туда же.
+    private func watchPlace() {
+        placeObservation?.cancel()
+        let sourceId = sourceId
+        let observation = ValueObservation.tracking { db in
+            try Source.fetchOne(db, key: sourceId).map { StoredReadingPlace(locator: $0.locator, openedAt: $0.lastOpenedAt) }
+        }
+        .removeDuplicates()
+        let reader = database.reader
+        placeObservation = Task { [weak self] in
+            do {
+                for try await place in observation.values(in: reader) {
+                    guard let self else { return }
+                    self.placeChanged(place)
+                }
+            } catch {
+                lumenLog.error("Reading place observation failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    private func placeChanged(_ place: StoredReadingPlace?) {
+        guard let place else { return }
+        let readElsewhere = place.openedAt != seenOpenedAt
+        seenOpenedAt = place.openedAt
+        guard let locator = place.locator, locator != storedPlace else { return }
+        storedPlace = locator
+        // Пока книга звучит на этом устройстве, место ведёт голос.
+        if isSpeaking { return }
+        guard hasRestoredPosition else {
+            // Книга ещё открывается: она откроется сразу на новом месте.
+            startAt(locator)
+            return
+        }
+        guard !ReadingPlace.isSame(readingLocator, locator) else { return }
+        openedPlace = locator
+        movedFromElsewhereAt = Date()
+        go(to: locator)
+        // У ссылки на место время открытия не меняется: тогда это не другое устройство.
+        if readElsewhere { showToast("Продолжаем с места на другом устройстве") }
+    }
+
+    /// Книга звучит вслух на этом устройстве (не на паузе).
+    private var isSpeaking: Bool {
+        ReadAloud.shared.isPlaying && ReadAloud.shared.sourceId == sourceId
+    }
+
+    /// Книгу только что перенесло на место с другого устройства: прокрутка туда не чтение здесь.
+    private var isSettlingMove: Bool {
+        movedFromElsewhereAt.map { Date().timeIntervalSince($0) < 3 } ?? false
+    }
+
+    /// Место для записи, если оно сдвинулось с того, что уже в базе.
+    private func placeToSave() -> (locator: SourceLocator, progress: Double)? {
+        let locator = readingLocator
+        if let openedPlace {
+            guard !ReadingPlace.isSame(locator, openedPlace) else { return nil }
+            self.openedPlace = nil
+        }
+        guard locator != storedPlace else { return nil }
+        return (locator, progress)
     }
 
     /// Первое открытие: к выделению из выписки или туда, где остановились.
@@ -798,12 +883,25 @@ final class ReaderModel {
         if let selection, pdfText == nil, selection.locator.section == section, let offset = selection.locator.textOffset {
             return offset
         }
-        if let offset = await web.topOffset() { return offset }
+        if let top = await web.topOffset() {
+            // Книга открылась там, где дослушали на другом устройстве: голос продолжает с той же
+            // фразы, а не с начала строки, которая на этом экране оказалась вверху.
+            if pdfText == nil, let openedPlace, openedPlace.section == section, let saved = openedPlace.textOffset,
+               top <= saved, saved - top <= Self.speechResumeSlack {
+                return saved
+            }
+            return top
+        }
         return sectionTextOffset ?? 0
     }
 
+    /// Сколько символов от строки вверху экрана до места, где дослушали, ещё значит «та же строка».
+    static let speechResumeSlack = 250
+
     /// Голос дошёл до этой части: место чтения и время чтения идут за ним.
     func listened(to part: SpeechPart) {
+        // Дослушанная фраза всегда новое место, даже рядом с тем, где книгу открыли.
+        openedPlace = nil
         sectionTextOffset = part.start
         scheduleSave()
     }
@@ -862,7 +960,8 @@ final class ReaderModel {
             selection = nil
         case .scrolled(let progression, let anchor, let offset):
             sectionProgression = progression
-            sectionTextOffset = offset
+            // Пока книга звучит, место чтения это звучащая фраза, а не строка вверху экрана.
+            if !isSpeaking { sectionTextOffset = offset }
             currentAnchor = anchor
             scheduleSave()
         case .highlightTapped(let id):
@@ -1031,16 +1130,18 @@ final class ReaderModel {
     }
 
     private func scheduleSave() {
-        noteActivity()
+        if !isSettlingMove { noteActivity() }
         guard hasRestoredPosition else { return }
         saveTask?.cancel()
-        let locator = readingLocator
-        let progress = progress
+        let place = placeToSave()
         let session = readingSession
         saveTask = Task { [database, sourceId] in
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled else { return }
-            try? await database.saveReadingPosition(sourceId, locator: locator, progress: progress)
+            if let place {
+                self.storedPlace = place.locator
+                try? await database.saveReadingPosition(sourceId, locator: place.locator, progress: place.progress)
+            }
             if let session, session.seconds >= 1 { try? await database.saveReadingSession(session) }
         }
     }
@@ -1266,11 +1367,18 @@ final class ReaderModel {
         if let readingSession, readingSession.seconds >= 1 {
             try? await database.saveReadingSession(readingSession)
         }
-        if hasRestoredPosition {
-            try? await database.saveReadingPosition(sourceId, locator: readingLocator, progress: progress)
+        if hasRestoredPosition, let place = placeToSave() {
+            storedPlace = place.locator
+            try? await database.saveReadingPosition(sourceId, locator: place.locator, progress: place.progress)
         }
         await notes?.flush()
     }
+}
+
+/// Место чтения и время открытия книги в базе.
+private struct StoredReadingPlace: Equatable, Sendable {
+    var locator: SourceLocator?
+    var openedAt: Date?
 }
 
 private extension Highlight {

@@ -6,6 +6,9 @@ import OSLog
 #if canImport(UIKit)
 import UIKit
 #endif
+#if os(macOS)
+import AppKit
+#endif
 
 private let folderSyncLog = Logger(subsystem: "io.github.bradd06.lumen", category: "folder-sync")
 
@@ -51,6 +54,8 @@ public final class FolderSyncController {
     private var observation: Task<Void, Never>?
     private var debounceTask: Task<Void, Never>?
     private var isRunning = false
+    /// Подписка на возвращение в приложение на Mac.
+    private var activation: (any NSObjectProtocol)?
     private var runAgain = false
 
     public init(database: AppDatabase, status: SyncStatus) {
@@ -146,6 +151,40 @@ public final class FolderSyncController {
         }
     }
 
+    /// Приложение ушло в фон. iPhone почти сразу усыпляет приложение, и круг синхронизации
+    /// обрывался: другое устройство открывало книгу на старом месте. Система даёт несколько
+    /// секунд, чтобы место чтения и последние правки успели уехать в папку.
+    public func syncBeforeSuspend() {
+        guard engine != nil else { return }
+        #if os(iOS)
+        let background = BackgroundTime()
+        background.begin()
+        Task {
+            // Читалка и редактор записывают свои правки в этот же момент: круг ждёт их.
+            try? await Task.sleep(for: .milliseconds(700))
+            await syncUntilSent()
+            background.end()
+        }
+        #else
+        syncNow()
+        #endif
+    }
+
+    /// Круги подряд, пока в очереди есть неотправленные правки (не больше трёх).
+    private func syncUntilSent() async {
+        for _ in 0..<3 {
+            debounceTask?.cancel()
+            syncNow()
+            while isRunning {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            let pending = (try? await database.reader.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncChange") ?? 0
+            }) ?? 0
+            if pending == 0 || engine == nil { return }
+        }
+    }
+
     // MARK: Внутреннее
 
     private func turnOn(_ picked: URL) {
@@ -155,6 +194,7 @@ public final class FolderSyncController {
         place = FolderSyncPlace(dataFolder: root)
         status.state = .syncing
         observeLocalChanges()
+        observeActivation()
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 self?.syncNow()
@@ -176,6 +216,19 @@ public final class FolderSyncController {
         hasSynced = false
         pickedFolder?.stopAccessingSecurityScopedResource()
         pickedFolder = nil
+    }
+
+    /// Mac: вернулись в приложение (например, после чтения на iPhone) — круг сразу, а не через
+    /// полминуты, чтобы открытая книга перешла на новое место.
+    private func observeActivation() {
+        #if os(macOS)
+        guard activation == nil else { return }
+        activation = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncNow() }
+        }
+        #endif
     }
 
     /// Правка на этом устройстве: круг через пару секунд, чтобы правки подряд уехали вместе.
@@ -274,3 +327,23 @@ public final class FolderSyncController {
         return error.localizedDescription
     }
 }
+
+#if os(iOS)
+/// Несколько секунд работы в фоне, которые система даёт приложению после сворачивания.
+@MainActor
+private final class BackgroundTime {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+
+    func begin() {
+        id = UIApplication.shared.beginBackgroundTask(withName: "Lumen sync") { [weak self] in
+            MainActor.assumeIsolated { self?.end() }
+        }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        id = .invalid
+    }
+}
+#endif

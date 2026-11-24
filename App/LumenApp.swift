@@ -35,7 +35,12 @@ struct LumenApp: App {
         #endif
         // Открыли приложение или ушли из него: правки сразу уезжают в папку и приходят из неё.
         .onChange(of: scenePhase) { _, phase in
-            if phase != .inactive { AppEnvironment.folderSyncController?.syncNow() }
+            switch phase {
+            case .active: AppEnvironment.folderSyncController?.syncNow()
+            // На iPhone приложение засыпает почти сразу: просим у системы время досинхронизировать.
+            case .background: AppEnvironment.folderSyncController?.syncBeforeSuspend()
+            default: break
+            }
         }
         .commands {
             EditorCommands()
