@@ -58,7 +58,17 @@ enum ReadingText {
     }
 
     static func time(_ date: Date) -> String {
-        date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute().locale(locale))
+        date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).locale(locale))
+    }
+
+    /// «12:36–12:44 · 8 мин». Минуты округлены, чтобы совпадать с часами на концах.
+    /// В старых отрезках (до разбивки по перерывам) внутри бывали паузы: тогда минут меньше,
+    /// чем между началом и концом, и это сказано прямо.
+    static func session(_ session: ReadingSession) -> String {
+        let minutes = max(1, Int((session.seconds / 60).rounded()))
+        let span = session.endedAt.timeIntervalSince(session.startedAt)
+        let pauses = span - session.seconds > 120 ? ", с перерывами" : ""
+        return "\(time(session.startedAt))–\(time(session.endedAt)) · \(ReadingStats.format(Double(minutes * 60), short: true))\(pauses)"
     }
 
     static func percent(_ value: Double) -> String {

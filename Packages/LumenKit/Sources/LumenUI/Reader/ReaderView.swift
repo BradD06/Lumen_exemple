@@ -207,7 +207,11 @@ struct ReaderView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             // Свернули приложение: место чтения и время сохраняются сразу.
-            if phase != .active { Task { await model.flush() } }
+            if phase == .background {
+                Task { await model.endReadingStretch() }
+            } else if phase != .active {
+                Task { await model.flush() }
+            }
         }
     }
 

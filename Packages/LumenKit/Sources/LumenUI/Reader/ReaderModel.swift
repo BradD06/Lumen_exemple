@@ -1048,29 +1048,41 @@ final class ReaderModel {
     // MARK: Время чтения
 
     /// Человек что-то сделал в книге. Время с прошлого действия засчитывается, если не было
-    /// долгого перерыва; после перерыва счёт просто продолжается с этого момента.
+    /// долгого перерыва. После перерыва прошлый отрезок закончен на последнем действии и с этого
+    /// момента идёт новый: так «с … по …» в «Когда читал» совпадает с минутами чтения.
     func noteActivity(at now: Date = Date()) {
         guard source != nil else { return }
         // Пока место не восстановлено, текущая доля это начало книги, а не то, где остановились.
         let current = hasRestoredPosition ? progress : (source?.progress ?? 0)
-        if var session = readingSession {
-            if let lastActivity, now.timeIntervalSince(lastActivity) <= Self.idleLimit {
-                session.seconds += max(now.timeIntervalSince(lastActivity), 0)
-                session.endedAt = now
-            }
+        if var session = readingSession, let lastActivity, now.timeIntervalSince(lastActivity) <= Self.idleLimit {
+            session.seconds += max(now.timeIntervalSince(lastActivity), 0)
+            session.endedAt = now
             if hasRestoredPosition { session.endProgress = current }
             readingSession = session
         } else {
+            let finished = readingSession
+            if let finished, finished.seconds >= 1 {
+                Task { [database] in try? await database.saveReadingSession(finished) }
+            }
             readingSession = ReadingSession(
                 sourceId: sourceId,
                 startedAt: now,
                 endedAt: now,
                 seconds: 0,
-                startProgress: current,
+                // Страницы, перевёрнутые первым действием после перерыва, идут в новый отрезок.
+                startProgress: finished?.endProgress ?? current,
                 endProgress: current
             )
         }
         lastActivity = now
+    }
+
+    /// Приложение ушло в фон: время до этой минуты записано, следующее действие начнёт
+    /// новый отрезок. Пока книга звучит вслух, отрезок продолжается.
+    func endReadingStretch() async {
+        await flush()
+        if ReadAloud.shared.isPlaying, ReadAloud.shared.sourceId == sourceId { return }
+        lastActivity = nil
     }
 
     // MARK: Выделения и выписки
