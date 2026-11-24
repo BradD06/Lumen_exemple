@@ -163,8 +163,11 @@ private struct TabCircle: View {
                     .opacity(isSelected ? 1 : 0)
             }
             .overlay(alignment: .topTrailing) { closeButton }
-            .overlay(alignment: .top) { tooltip }
+            // Правым краем к правому краю кружка: название растёт влево, над соседями, а не на остров.
+            .overlay(alignment: .bottomTrailing) { tooltip }
             .scaleEffect(isHovered && !isSelected ? 1.06 : 1)
+            // Соседние кружки рисуются позже и иначе закрыли бы название.
+            .zIndex(isHovered ? 1 : 0)
             .onHover { hovering in
                 withAnimation(LumenMotion.quick) { isHovered = hovering }
             }
@@ -236,7 +239,8 @@ private struct TabCircle: View {
         }
     }
 
-    /// Название над кружком, пока на него наведена мышь.
+    /// Название над кружком, пока на него наведена мышь. Поднято отступом снизу на высоту кружка,
+    /// а не `alignmentGuide`: тот на Mac не срабатывал, и название ложилось прямо на кружки.
     @ViewBuilder
     private var tooltip: some View {
         if isHovered, !glyphs.isEmpty {
@@ -256,7 +260,7 @@ private struct TabCircle: View {
             .frame(maxWidth: 260, alignment: .leading)
             .lumenGlass(RoundedRectangle(cornerRadius: 12, style: .continuous), prominent: true)
             .fixedSize()
-            .alignmentGuide(.top) { $0[.bottom] + 12 }
+            .padding(.bottom, IslandTabs.size + 10)
             .allowsHitTesting(false)
             .transition(.opacity.combined(with: .offset(y: 4)))
         }
