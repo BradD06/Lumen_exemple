@@ -278,6 +278,10 @@ final class ReadAloud {
     @ObservationIgnored private var chapterSection: Int?
     /// Текст звучащей главы: из него части делятся заново, когда голос читает иначе.
     @ObservationIgnored private var blocks: [SpeechBlock] = []
+    /// Предложения главы: голос может читать абзацами, а подсвечивается одно предложение.
+    @ObservationIgnored private var sentences: [SpeechPart] = []
+    /// Подсвеченное предложение, в символах главы.
+    @ObservationIgnored private var markedSentence: Range<Int>?
 
     private static var storedRate: Double {
         let value = UserDefaults.standard.double(forKey: rateKey)
@@ -397,6 +401,8 @@ final class ReadAloud {
         showsRooms = false
         parts = []
         blocks = []
+        sentences = []
+        markedSentence = nil
         index = 0
         isPaused = false
         isPreparing = false
@@ -505,6 +511,7 @@ final class ReadAloud {
         self.blocks = blocks
         // Язык по предложениям: от него зависит, какой голос читает, а от голоса — как делить главу.
         let sentences = SpeechText.parts(from: blocks)
+        self.sentences = sentences
         language = SpeechText.language(of: sentences)
         apple.language = language
         neural.language = language
@@ -553,13 +560,24 @@ final class ReadAloud {
         }
         guard let places = wordPlaces?.places, let word = SpeechTiming.chapterRange(of: range, in: places) else { return }
         let follow = UserDefaults.standard.object(forKey: Self.followKey) as? Bool ?? true
+        // Голос перешёл к следующему предложению абзаца: подсветка переходит вместе с ним.
+        markSentence(SpeechText.sentence(at: word.location, of: part, in: sentences), follow: follow)
         reader.web.markSpokenWord(start: word.location, end: word.location + word.length, follow: follow)
+    }
+
+    /// Подсвечивает предложение, если подсвечено другое.
+    private func markSentence(_ sentence: Range<Int>, follow: Bool) {
+        guard let reader, sentence != markedSentence else { return }
+        markedSentence = sentence
+        reader.web.markSpoken(start: sentence.lowerBound, end: sentence.upperBound, follow: follow)
     }
 
     private func mark(_ part: SpeechPart, follow: Bool) {
         guard let reader, reader.section == chapterSection else { return }
         if UserDefaults.standard.object(forKey: Self.highlightKey) as? Bool ?? true {
-            reader.web.markSpoken(start: part.start, end: part.end, follow: follow)
+            // Часть началась: подсвечено её первое предложение, дальше подсветка идёт за словами.
+            markedSentence = nil
+            markSentence(SpeechText.sentence(at: part.start, of: part, in: sentences), follow: follow)
         } else if follow {
             reader.web.scroll(toOffset: part.start)
         }
