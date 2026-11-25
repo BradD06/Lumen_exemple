@@ -88,6 +88,25 @@ struct SpeechTextTests {
         #expect(parts.allSatisfy { $0.end <= blocks[1].start || $0.start >= blocks[1].start })
     }
 
+    @Test func highlightGoesBySentenceInsideAParagraphPart() {
+        let blocks = [SpeechBlock(text: paragraph(6), start: 50)]
+        let sentences = SpeechText.parts(from: blocks)
+        let part = SpeechText.parts(from: blocks, groupLength: SpeechText.paragraphLength)[0]
+        #expect(sentences.count == 6)
+        #expect(part.start == sentences[0].start && part.end == sentences[5].end)
+        let range = { (sentence: SpeechPart) in sentence.start..<sentence.end }
+        // Часть началась: подсвечено первое предложение, а не весь абзац.
+        #expect(SpeechText.sentence(at: part.start, of: part, in: sentences) == range(sentences[0]))
+        // Голос дошёл до слова в третьем предложении.
+        #expect(SpeechText.sentence(at: sentences[2].start + 5, of: part, in: sentences) == range(sentences[2]))
+        // Пробел между предложениями относится к следующему.
+        #expect(SpeechText.sentence(at: sentences[3].start - 1, of: part, in: sentences) == range(sentences[3]))
+        // Голос, который читает по предложению, подсвечивает свою часть целиком.
+        #expect(SpeechText.sentence(at: sentences[2].start, of: sentences[2], in: sentences) == range(sentences[2]))
+        // Предложений нет — вся часть.
+        #expect(SpeechText.sentence(at: part.start, of: part, in: []) == range(part))
+    }
+
     @Test func rampFromTheEndIsJustParagraphs() {
         let parts = SpeechText.ramped(from: [SpeechBlock(text: paragraph(40), start: 0)], startingAt: .max)
         #expect(parts.count < 5)

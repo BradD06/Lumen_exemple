@@ -135,6 +135,18 @@ public enum SpeechText {
     }
 
     /// Язык главы, чтобы выбрать голос: «ru», «en»…
+    /// Предложение части `part`, на котором стоит место `offset`, в символах главы: голос может читать
+    /// целыми абзацами, а подсветка всё равно идёт по предложениям (`sentences` — части `parts(from:)`).
+    /// Не нашлось — вся часть.
+    public static func sentence(at offset: Int, of part: SpeechPart, in sentences: [SpeechPart]) -> Range<Int> {
+        let whole = part.start..<part.end
+        guard let found = index(of: max(offset, part.start), in: sentences) else { return whole }
+        let sentence = sentences[found]
+        let start = max(sentence.start, part.start)
+        let end = min(sentence.end, part.end)
+        return start < end ? start..<end : whole
+    }
+
     public static func language(of parts: [SpeechPart]) -> String? {
         var sample = ""
         for part in parts where !part.isHeading && part.spoken != codeNotice {
